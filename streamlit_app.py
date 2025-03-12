@@ -5,7 +5,7 @@ import tempfile
 import pickle
 import re
 import unicodedata
-from python-docx import Document
+from python_docx import Document
 from docx.document import Document as _Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
