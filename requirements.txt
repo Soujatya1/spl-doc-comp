@@ -4,4 +4,7 @@ python-docx
 difflib
 rapidfuzz
 langchain-community
-langchain_groq
+langchain-groq
+openpyxl
+sentence-transformers
+faiss-cpu
