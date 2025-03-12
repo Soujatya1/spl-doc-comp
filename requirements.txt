@@ -1,2 +1,7 @@
 streamlit
 pandas
+python-docx
+difflib
+rapidfuzz
+langchain-community
+langchain_groq
