@@ -25,8 +25,18 @@ st.set_page_config(
     layout="wide"
 )
 
-# Create temp directory for storing temporary files
-temp_dir = tempfile.TemporaryDirectory()
+# Initialize session state for storing temporary file paths
+if 'temp_dir' not in st.session_state:
+    st.session_state['temp_dir'] = tempfile.mkdtemp()
+    
+if 'company_path' not in st.session_state:
+    st.session_state['company_path'] = None
+    
+if 'customer_path' not in st.session_state:
+    st.session_state['customer_path'] = None
+    
+if 'checklist_path' not in st.session_state:
+    st.session_state['checklist_path'] = None
 
 # Main functions from the original code
 def preprocess_text(text):
@@ -60,39 +70,46 @@ def extract_text_by_sections(docx_path):
     Returns a list of dictionaries with keys: section, text, type, and order.
     When a heading (style containing "heading") is encountered, the current section is updated.
     """
-    extracted_data = []
-    doc = Document(docx_path)
-    current_section = "unknown_section"
-    order_counter = 0
+    try:
+        extracted_data = []
+        doc = Document(docx_path)  # This line could cause the PackageNotFoundError
+        current_section = "unknown_section"
+        order_counter = 0
 
-    for block in iter_block_items(doc):
-        if block.__class__.__name__ == "Paragraph":
-            para_text = preprocess_text(block.text)
-            if block.style and "heading" in block.style.name.lower() and para_text:
-                current_section = para_text
-            elif para_text:
-                extracted_data.append({
-                    "section": current_section,
-                    "text": para_text,
-                    "type": "paragraph",
-                    "order": order_counter
-                })
-                order_counter += 1
-        elif block.__class__.__name__ == "Table":
-            table_data = []
-            for row in block.rows:
-                row_cells = [preprocess_text(cell.text.strip()) for cell in row.cells]
-                table_data.append(" | ".join(row_cells))
-            table_text = "\n".join(table_data)
-            if table_text:
-                extracted_data.append({
-                    "section": current_section,
-                    "text": f"[TABLE] {table_text}",
-                    "type": "table",
-                    "order": order_counter
-                })
-                order_counter += 1
-    return extracted_data
+        for block in iter_block_items(doc):
+            if block.__class__.__name__ == "Paragraph":
+                para_text = preprocess_text(block.text)
+                if block.style and "heading" in block.style.name.lower() and para_text:
+                    current_section = para_text
+                elif para_text:
+                    extracted_data.append({
+                        "section": current_section,
+                        "text": para_text,
+                        "type": "paragraph",
+                        "order": order_counter
+                    })
+                    order_counter += 1
+            elif block.__class__.__name__ == "Table":
+                table_data = []
+                for row in block.rows:
+                    row_cells = [preprocess_text(cell.text.strip()) for cell in row.cells]
+                    table_data.append(" | ".join(row_cells))
+                table_text = "\n".join(table_data)
+                if table_text:
+                    extracted_data.append({
+                        "section": current_section,
+                        "text": f"[TABLE] {table_text}",
+                        "type": "table",
+                        "order": order_counter
+                    })
+                    order_counter += 1
+        return extracted_data
+    except Exception as e:
+        st.error(f"Error extracting text from document: {e}")
+        st.error(f"Attempted to open file at: {docx_path}")
+        if not os.path.exists(docx_path):
+            st.error(f"File does not exist at the specified path: {docx_path}")
+        return []
 
 def split_text_into_lines(text):
     """Splits text into lines by newline or pipe symbol."""
@@ -175,22 +192,26 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index_path):
       - "start" that includes the start_marker, and
       - "end" that includes the end_marker.
     """
-    with open(faiss_index_path, "rb") as f:
-        faiss_index = pickle.load(f)
+    try:
+        with open(faiss_index_path, "rb") as f:
+            faiss_index = pickle.load(f)
 
-    matching_sections = []
-    # Iterate through all stored documents in the FAISS index
-    for doc in faiss_index.documents:
-        metadata = doc.metadata
-        if (page_name.lower() in metadata.get("section", "").lower() and
-                start_marker.lower() in metadata.get("start", "").lower() and
-                end_marker.lower() in metadata.get("end", "").lower()):
-            extracted_text = extract_content_within_markers(doc.page_content, start_marker, end_marker)
-            matching_sections.append({
-                "text": extracted_text,
-                "metadata": metadata
-            })
-    return matching_sections
+        matching_sections = []
+        # Iterate through all stored documents in the FAISS index
+        for doc in faiss_index.documents:
+            metadata = doc.metadata
+            if (page_name.lower() in metadata.get("section", "").lower() and
+                    start_marker.lower() in metadata.get("start", "").lower() and
+                    end_marker.lower() in metadata.get("end", "").lower()):
+                extracted_text = extract_content_within_markers(doc.page_content, start_marker, end_marker)
+                matching_sections.append({
+                    "text": extracted_text,
+                    "metadata": metadata
+                })
+        return matching_sections
+    except Exception as e:
+        st.error(f"Error retrieving section: {e}")
+        return []
 
 def extract_section(extracted_data, start_marker, end_marker):
     """Sorts extracted data by order, combines text, splits into lines, then extracts substring between best matching markers."""
@@ -219,40 +240,61 @@ def store_sections_in_faiss(docx_path, checklist_path, faiss_index_path):
     Reads the DOCX file, extracts sections based on the checklist (PageName, StartMarker, EndMarker),
     creates Document objects with metadata, and stores them in a FAISS vector store.
     """
-    extracted_data = extract_text_by_sections(docx_path)
-    checklist_df = pd.read_excel(checklist_path)
-    sections = []
-    for _, row in checklist_df.iterrows():
-        section_name = row['PageName'].strip().lower()
-        start_marker = preprocess_text(row['StartMarker'])
-        end_marker = preprocess_text(row['EndMarker'])
-        section_text = extract_section(extracted_data, start_marker, end_marker)
-        if section_text:
-            metadata = {
-                "section": section_name,
-                "start": start_marker,
-                "end": end_marker,
-                "source": os.path.basename(docx_path)
-            }
-            doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
-            sections.append(doc_obj)
-    
-    # Initialize embedding model
-    with st.spinner("Creating embeddings... This may take a moment."):
-        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        faiss_index = FAISS.from_documents(sections, embedding_model)
-    
-    # Attach documents for later retrieval
-    faiss_index.documents = sections
-    
-    output_dir = os.path.dirname(faiss_index_path)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    with open(faiss_index_path, "wb") as f:
-        pickle.dump(faiss_index, f)
-    
-    return faiss_index
+    try:
+        # Verify files exist
+        if not os.path.exists(docx_path):
+            st.error(f"Document file not found at: {docx_path}")
+            return None
+            
+        if not os.path.exists(checklist_path):
+            st.error(f"Checklist file not found at: {checklist_path}")
+            return None
+            
+        extracted_data = extract_text_by_sections(docx_path)
+        if not extracted_data:
+            st.error(f"Failed to extract text from document: {docx_path}")
+            return None
+            
+        checklist_df = pd.read_excel(checklist_path)
+        sections = []
+        for _, row in checklist_df.iterrows():
+            section_name = row['PageName'].strip().lower()
+            start_marker = preprocess_text(row['StartMarker'])
+            end_marker = preprocess_text(row['EndMarker'])
+            section_text = extract_section(extracted_data, start_marker, end_marker)
+            if section_text:
+                metadata = {
+                    "section": section_name,
+                    "start": start_marker,
+                    "end": end_marker,
+                    "source": os.path.basename(docx_path)
+                }
+                doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
+                sections.append(doc_obj)
+        
+        if not sections:
+            st.warning(f"No sections were extracted from {os.path.basename(docx_path)}")
+            return None
+            
+        # Initialize embedding model
+        with st.spinner("Creating embeddings... This may take a moment."):
+            embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            faiss_index = FAISS.from_documents(sections, embedding_model)
+        
+        # Attach documents for later retrieval
+        faiss_index.documents = sections
+        
+        output_dir = os.path.dirname(faiss_index_path)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        with open(faiss_index_path, "wb") as f:
+            pickle.dump(faiss_index, f)
+        
+        return faiss_index
+    except Exception as e:
+        st.error(f"Error in store_sections_in_faiss: {e}")
+        return None
 
 def format_batch_prompt(df_batch):
     """
@@ -277,27 +319,35 @@ def process_batch(df_batch, api_key):
     """
     Processes a batch of rows by creating a prompt, calling the LLM, and parsing the JSON response.
     """
-    chatgroq_llm = ChatGroq(
-        api_key=api_key,
-        model_name="Llama3-8b-8192"
-    )
-    
-    prompt = format_batch_prompt(df_batch)
-    with st.spinner("Processing batch with LLM..."):
-        response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
-    
-    if not response.strip():
-        st.warning("Empty response from LLM.")
-        return []
-    
     try:
-        comparisons = json.loads(response)
+        chatgroq_llm = ChatGroq(
+            api_key=api_key,
+            model_name="Llama3-8b-8192"
+        )
+        
+        prompt = format_batch_prompt(df_batch)
+        with st.spinner("Processing batch with LLM..."):
+            response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
+        
+        if not response.strip():
+            st.warning("Empty response from LLM.")
+            return []
+        
+        # Extract JSON if wrapped in backticks
+        json_match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
+        if json_match:
+            response = json_match.group(1)
+        
+        try:
+            comparisons = json.loads(response)
+            return comparisons
+        except Exception as e:
+            st.error(f"Error parsing LLM response: {e}")
+            st.code(response)
+            return []
     except Exception as e:
-        st.error(f"Error parsing LLM response: {e}")
-        st.code(response)
-        comparisons = []
-    
-    return comparisons
+        st.error(f"Error in LLM processing: {e}")
+        return []
 
 def compare_dataframe(df, api_key, batch_size=50):
     """
@@ -312,12 +362,12 @@ def compare_dataframe(df, api_key, batch_size=50):
         total_batches = (len(df) + batch_size - 1) // batch_size
         
         for i in range(0, len(df), batch_size):
-            batch = df.iloc[i:i + batch_size]
+            batch = df.iloc[i:i + min(batch_size, len(df) - i)]
             comparisons = process_batch(batch, api_key)
             all_comparisons.extend(comparisons)
             
             # Update progress
-            progress_bar.progress((i + batch_size) / len(df))
+            progress_bar.progress(min(1.0, (i + batch_size) / len(df)))
     
     # Merge the comparisons back into the original DataFrame
     df['Comparison'] = df.index.map(
@@ -422,87 +472,91 @@ def categorize_with_llm(comparison_df, api_key):
     Uses LLM to categorize differences into structured format.
     This provides more sophisticated categorization than rule-based approach.
     """
-    chatgroq_llm = ChatGroq(
-        api_key=api_key,
-        model_name="Llama3-8b-8192"
-    )
-    
-    # Filter only rows with differences
-    diff_rows = comparison_df[comparison_df['Comparison'] == 'DIFFERENT']
-    
-    if diff_rows.empty:
-        return pd.DataFrame(columns=[
-            'Samples affected', 
-            'Observation - Category', 
-            'Page', 
-            'Sub-category of Observation'
-        ])
-    
-    # Prepare the prompt
-    prompt = """
-    Analyze the following document comparison differences and categorize them into a structured format. 
-    For each difference, determine:
-    1. What category of observation it belongs to (e.g., "Mismatch of content between Filed Copy and customer copy", "Available in Filed Copy but missing in Customer Copy")
-    2. Which page/section it relates to (e.g., "Forwarding Letter", "CIS", "Address & Contact Details of Ombudsman Centres")
-    3. A specific sub-category description of the observation
-    
-    Here are the differences:
-    """
-    
-    for idx, row in diff_rows.iterrows():
-        sample_id = row.get('SampleID', idx)
-        prompt += f"\nSample {sample_id}: {row['Difference']}"
-    
-    prompt += """
-    
-    Return a JSON array where each object represents a group of similar differences with the following structure:
-    {
-        "samples_affected": ["sample1", "sample2", ...], 
-        "observation_category": "Category name",
-        "page": "Page name",
-        "sub_category": "Detailed description of the observation"
-    }
-    
-    Group similar differences together. If many samples (more than 5) have the same issue, use "All Samples" for samples_affected.
-    """
-    
-    with st.spinner("Using LLM to categorize findings..."):
-        response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
-    
     try:
-        # Extract JSON from response (it might be wrapped in markdown code blocks)
-        json_match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            json_str = response
+        chatgroq_llm = ChatGroq(
+            api_key=api_key,
+            model_name="Llama3-8b-8192"
+        )
         
-        # Parse the JSON
-        categories = json.loads(json_str)
+        # Filter only rows with differences
+        diff_rows = comparison_df[comparison_df['Comparison'] == 'DIFFERENT']
         
-        # Convert to DataFrame
-        findings_rows = []
-        for cat in categories:
-            samples = cat.get('samples_affected', [])
-            if isinstance(samples, list) and len(samples) > 0:
-                samples_str = ', '.join(samples) if samples[0] != "All Samples" else "All Samples"
+        if diff_rows.empty:
+            return pd.DataFrame(columns=[
+                'Samples affected', 
+                'Observation - Category', 
+                'Page', 
+                'Sub-category of Observation'
+            ])
+        
+        # Prepare the prompt
+        prompt = """
+        Analyze the following document comparison differences and categorize them into a structured format. 
+        For each difference, determine:
+        1. What category of observation it belongs to (e.g., "Mismatch of content between Filed Copy and customer copy", "Available in Filed Copy but missing in Customer Copy")
+        2. Which page/section it relates to (e.g., "Forwarding Letter", "CIS", "Address & Contact Details of Ombudsman Centres")
+        3. A specific sub-category description of the observation
+        
+        Here are the differences:
+        """
+        
+        for idx, row in diff_rows.iterrows():
+            sample_id = row.get('SampleID', idx)
+            prompt += f"\nSample {sample_id}: {row['Difference']}"
+        
+        prompt += """
+        
+        Return a JSON array where each object represents a group of similar differences with the following structure:
+        {
+            "samples_affected": ["sample1", "sample2", ...], 
+            "observation_category": "Category name",
+            "page": "Page name",
+            "sub_category": "Detailed description of the observation"
+        }
+        
+        Group similar differences together. If many samples (more than 5) have the same issue, use "All Samples" for samples_affected.
+        """
+        
+        with st.spinner("Using LLM to categorize findings..."):
+            response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
+        
+        try:
+            # Extract JSON from response (it might be wrapped in markdown code blocks)
+            json_match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
             else:
-                samples_str = "Unknown"
-                
-            findings_rows.append({
-                'Samples affected': samples_str,
-                'Observation - Category': cat.get('observation_category', 'Other'),
-                'Page': cat.get('page', 'Unknown'),
-                'Sub-category of Observation': cat.get('sub_category', '')
-            })
-        
-        findings_df = pd.DataFrame(findings_rows)
-        return findings_df
-        
+                json_str = response
+            
+            # Parse the JSON
+            categories = json.loads(json_str)
+            
+            # Convert to DataFrame
+            findings_rows = []
+            for cat in categories:
+                samples = cat.get('samples_affected', [])
+                if isinstance(samples, list) and len(samples) > 0:
+                    samples_str = ', '.join(samples) if samples[0] != "All Samples" else "All Samples"
+                else:
+                    samples_str = "Unknown"
+                    
+                findings_rows.append({
+                    'Samples affected': samples_str,
+                    'Observation - Category': cat.get('observation_category', 'Other'),
+                    'Page': cat.get('page', 'Unknown'),
+                    'Sub-category of Observation': cat.get('sub_category', '')
+                })
+            
+            findings_df = pd.DataFrame(findings_rows)
+            return findings_df
+            
+        except Exception as e:
+            st.error(f"Error parsing LLM categorization response: {e}")
+            st.code(response)
+            # Fall back to rule-based categorization
+            return categorize_differences(comparison_df)
     except Exception as e:
-        st.error(f"Error parsing LLM categorization response: {e}")
-        st.code(response)
-        # Fall back to rule-based categorization
+        st.error(f"Error in LLM categorization: {e}")
         return categorize_differences(comparison_df)
 
 def generate_structured_findings(comparison_df, api_key=None):
@@ -518,6 +572,16 @@ def generate_structured_findings(comparison_df, api_key=None):
         # Use rule-based categorization
         return categorize_differences(comparison_df)
 
+# Function to save uploaded file
+def save_uploaded_file(uploaded_file, save_path):
+    try:
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+        return True
+    except Exception as e:
+        st.error(f"Error saving file: {e}")
+        return False
+
 # STREAMLIT UI
 def main():
     st.title("Document Comparison Tool")
@@ -527,6 +591,10 @@ def main():
         st.session_state['comparison_results'] = None
     if 'findings_report' not in st.session_state:
         st.session_state['findings_report'] = None
+    if 'groq_api_key' not in st.session_state:
+        st.session_state['groq_api_key'] = ""
+    if 'batch_size' not in st.session_state:
+        st.session_state['batch_size'] = 50
     
     # Create tabs for different sections
     tabs = st.tabs(["Document Comparison", "Structured Findings", "Settings"])
@@ -540,29 +608,46 @@ def main():
         
         with col1:
             company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
+            if company_file:
+                # Save uploaded file to temp directory
+                company_path = os.path.join(st.session_state['temp_dir'], "company.docx")
+                if save_uploaded_file(company_file, company_path):
+                    st.session_state['company_path'] = company_path
+                    st.success(f"Uploaded: {company_file.name}")
         
         with col2:
             customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
+            if customer_file:
+                # Save uploaded file to temp directory
+                customer_path = os.path.join(st.session_state['temp_dir'], "customer.docx")
+                if save_uploaded_file(customer_file, customer_path):
+                    st.session_state['customer_path'] = customer_path
+                    st.success(f"Uploaded: {customer_file.name}")
         
         with col3:
             checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
+            if checklist_file:
+                # Save uploaded file to temp directory
+                checklist_path = os.path.join(st.session_state['temp_dir'], "checklist.xlsx")
+                if save_uploaded_file(checklist_file, checklist_path):
+                    st.session_state['checklist_path'] = checklist_path
+                    st.success(f"Uploaded: {checklist_file.name}")
         
-        # Process files if uploaded
-        if company_file and customer_file and checklist_file:
-            # Save uploaded files to temp directory
-            company_path = os.path.join(temp_dir.name, "company.docx")
-            customer_path = os.path.join(temp_dir.name, "customer.docx")
-            checklist_path = os.path.join(temp_dir.name, "checklist.xlsx")
-            
-            with open(company_path, "wb") as f:
-                f.write(company_file.getvalue())
-            with open(customer_path, "wb") as f:
-                f.write(customer_file.getvalue())
-            with open(checklist_path, "wb") as f:
-                f.write(checklist_file.getvalue())
-            
+        # Check if all files are uploaded
+        files_ready = (
+            st.session_state['company_path'] and 
+            os.path.exists(st.session_state['company_path']) and
+            st.session_state['customer_path'] and 
+            os.path.exists(st.session_state['customer_path']) and
+            st.session_state['checklist_path'] and 
+            os.path.exists(st.session_state['checklist_path'])
+        )
+        
+        if not files_ready:
+            st.info("Please upload all required documents to proceed.")
+        else:
             # Create output directory for indices
-            index_dir = os.path.join(temp_dir.name, "indices")
+            index_dir = os.path.join(st.session_state['temp_dir'], "indices")
             os.makedirs(index_dir, exist_ok=True)
             
             company_index_path = os.path.join(index_dir, "company_index.pkl")
@@ -572,55 +657,74 @@ def main():
             if st.button("Process Documents"):
                 with st.spinner("Processing documents..."):
                     # Store sections in FAISS indices
-                    company_index = store_sections_in_faiss(company_path, checklist_path, company_index_path)
-                    customer_index = store_sections_in_faiss(customer_path, checklist_path, customer_index_path)
+                    company_index = store_sections_in_faiss(
+                        st.session_state['company_path'], 
+                        st.session_state['checklist_path'], 
+                        company_index_path
+                    )
                     
-                    # Read checklist
-                    checklist_df = pd.read_excel(checklist_path)
+                    customer_index = store_sections_in_faiss(
+                        st.session_state['customer_path'], 
+                        st.session_state['checklist_path'], 
+                        customer_index_path
+                    )
                     
-                    # Compare sections
-                    comparison_data = []
-                    for _, row in checklist_df.iterrows():
-                        page_name = row['PageName'].strip().lower()
-                        start_marker = preprocess_text(row['StartMarker'])
-                        end_marker = preprocess_text(row['EndMarker'])
-                        
-                        company_sections = retrieve_section(page_name, start_marker, end_marker, company_index_path)
-                        customer_sections = retrieve_section(page_name, start_marker, end_marker, customer_index_path)
-                        
-                        if company_sections and customer_sections:
-                            company_text = company_sections[0]['text']
-                            customer_text = customer_sections[0]['text']
-                            
-                            # Get lines
-                            company_lines = split_text_into_lines(company_text)
-                            customer_lines = split_text_into_lines(customer_text)
-                            
-                            # Line-by-line comparison
-                            for i, line in enumerate(company_lines):
-                                if line.strip():
-                                    best_match = find_best_line_match(line, customer_lines)
-                                    comparison_data.append({
-                                        'PageName': page_name,
-                                        'SampleID': f"{page_name}_{i}",
-                                        'CompanyLine': line,
-                                        'CustomerLine': best_match
-                                    })
-                    
-                    # Create comparison dataframe
-                    comparison_df = pd.DataFrame(comparison_data)
-                    
-                    # Check if Groq API key is set
-                    api_key = st.session_state.get('groq_api_key', '')
-                    if not api_key:
-                        st.warning("Groq API key not set. Please set it in the Settings tab.")
-                        st.session_state['comparison_results'] = comparison_df
+                    if company_index is None or customer_index is None:
+                        st.error("Failed to process documents. Please check the error messages and try again.")
                     else:
-                        # Use LLM for detailed comparison
-                        comparison_df = compare_dataframe(comparison_df, api_key)
-                        st.session_state['comparison_results'] = comparison_df
-                    
-                    st.success("Document comparison completed!")
+                        # Read checklist
+                        try:
+                            checklist_df = pd.read_excel(st.session_state['checklist_path'])
+                            
+                            # Compare sections
+                            comparison_data = []
+                            for _, row in checklist_df.iterrows():
+                                page_name = row['PageName'].strip().lower()
+                                start_marker = preprocess_text(row['StartMarker'])
+                                end_marker = preprocess_text(row['EndMarker'])
+                                
+                                company_sections = retrieve_section(page_name, start_marker, end_marker, company_index_path)
+                                customer_sections = retrieve_section(page_name, start_marker, end_marker, customer_index_path)
+                                
+                                if company_sections and customer_sections:
+                                    company_text = company_sections[0]['text']
+                                    customer_text = customer_sections[0]['text']
+                                    
+                                    # Get lines
+                                    company_lines = split_text_into_lines(company_text)
+                                    customer_lines = split_text_into_lines(customer_text)
+                                    
+                                    # Line-by-line comparison
+                                    for i, line in enumerate(company_lines):
+                                        if line.strip():
+                                            best_match = find_best_line_match(line, customer_lines)
+                                            comparison_data.append({
+                                                'PageName': page_name,
+                                                'SampleID': f"{page_name}_{i}",
+                                                'CompanyLine': line,
+                                                'CustomerLine': best_match
+                                            })
+                            
+                            # Create comparison dataframe
+                            comparison_df = pd.DataFrame(comparison_data)
+                            
+                            if comparison_df.empty:
+                                st.warning("No comparison data was generated. Please check your documents and checklist.")
+                            else:
+                                # Check if Groq API key is set
+                                api_key = st.session_state.get('groq_api_key', '')
+                                if not api_key:
+                                    st.warning("Groq API key not set. Please set it in the Settings tab to use LLM comparison.")
+                                    st.session_state['comparison_results'] = comparison_df
+                                else:
+                                    # Use LLM for detailed comparison
+                                    batch_size = st.session_state.get('batch_size', 50)
+                                    comparison_df = compare_dataframe(comparison_df, api_key, batch_size)
+                                    st.session_state['comparison_results'] = comparison_df
+                                
+                                st.success("Document comparison completed!")
+                        except Exception as e:
+                            st.error(f"Error during comparison: {e}")
             
             # Display comparison results if available
             if st.session_state['comparison_results'] is not None:
@@ -633,119 +737,4 @@ def main():
                     default=['DIFFERENT']
                 )
                 
-                filtered_df = st.session_state['comparison_results']
-                if filter_options:
-                    filtered_df = filtered_df[filtered_df['Comparison'].isin(filter_options)]
-                
-                st.dataframe(filtered_df)
-                
-                # Download button for CSV
-                csv = filtered_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    "Download Comparison Results (CSV)",
-                    data=csv,
-                    file_name="document_comparison_results.csv",
-                    mime="text/csv"
-                )
-    
-    with tabs[1]:
-        st.header("Structured Findings Report")
-        
-        if 'comparison_results' not in st.session_state or st.session_state['comparison_results'] is None:
-            st.warning("Please run a document comparison first before generating findings.")
-        else:
-            # Get comparison results from session state
-            df = st.session_state['comparison_results']
-            
-            # Check if we have API key for LLM categorization
-            use_llm = False
-            api_key = st.session_state.get('groq_api_key', '')
-            
-            if api_key:
-                use_llm = st.checkbox("Use LLM for advanced categorization", value=True)
-            
-            if st.button("Generate Structured Findings Report"):
-                findings_df = generate_structured_findings(df, api_key if use_llm else None)
-                
-                st.session_state['findings_report'] = findings_df
-                
-                # Display the findings
-                st.subheader("Structured Findings")
-                st.dataframe(findings_df)
-                
-                # Add download button for Excel
-                if not findings_df.empty:
-                    # Create Excel file with styling
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        findings_df.to_excel(writer, index=False, sheet_name='Findings')
-                        
-                        # Get the workbook and worksheet
-                        workbook = writer.book
-                        worksheet = writer.sheets['Findings']
-                        
-                        # Add styling
-                        from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-                        
-                        # Header styling
-                        header_fill = PatternFill(start_color='00CCFFFF', end_color='00CCFFFF', fill_type='solid')
-                        for cell in worksheet[1]:
-                            cell.fill = header_fill
-                            cell.font = Font(bold=True)
-                        
-                        # Column width
-                        for col in worksheet.columns:
-                            max_length = 0
-                            column = col[0].column_letter
-                            for cell in col:
-                                if cell.value:
-                                    max_length = max(max_length, len(str(cell.value)))
-                            adjusted_width = (max_length + 2) * 1.2
-                            worksheet.column_dimensions[column].width = min(adjusted_width, 50)
-                    
-                    excel_data = excel_buffer.getvalue()
-                    st.download_button(
-                        label="Download Findings Report (Excel)",
-                        data=excel_data,
-                        file_name="document_comparison_findings.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-            
-            # Display existing findings if available
-            if 'findings_report' in st.session_state and st.session_state['findings_report'] is not None:
-                if st.session_state['findings_report'].empty:
-                    st.info("No differences found that require reporting.")
-                else:
-                    st.subheader("Current Findings Report")
-                    st.dataframe(st.session_state['findings_report'])
-    
-    with tabs[2]:
-        st.header("Settings")
-        
-        st.subheader("API Configuration")
-        api_key = st.text_input(
-            "Groq API Key",
-            value=st.session_state.get('groq_api_key', ''),
-            type="password",
-            help="Enter your Groq API key for LLM-powered comparison"
-        )
-        
-        if api_key:
-            st.session_state['groq_api_key'] = api_key
-            st.success("API Key saved!")
-        
-        st.subheader("Advanced Settings")
-        batch_size = st.slider(
-            "LLM Processing Batch Size",
-            min_value=10,
-            max_value=100,
-            value=50,
-            step=10,
-            help="Number of lines to process in each LLM batch"
-        )
-        st.session_state['batch_size'] = batch_size
-        
-        # Clear session data
-        if st.button("Clear All Data"):
-            for key in list(st.session_state.keys()):
-                if key != 'groq_api_key':  # Keep API
+                filtered_
