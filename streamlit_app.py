@@ -5,6 +5,7 @@ import tempfile
 import pickle
 import re
 import unicodedata
+import io
 from docx import Document
 from docx.document import Document as _Document
 from docx.table import Table
@@ -326,252 +327,425 @@ def compare_dataframe(df, api_key, batch_size=50):
     
     return df
 
-def format_to_structured_table(comparison_results, api_key):
+# NEW FUNCTIONS FOR STRUCTURED FINDINGS
+
+def categorize_differences(comparison_df):
     """
-    Creates a prompt for the LLM to structure comparison results into a standard format
+    Takes the comparison dataframe and categorizes differences into structured format
+    similar to the Excel template shown in the example.
+    """
+    # Initialize an empty dataframe for the structured findings
+    findings_df = pd.DataFrame(columns=[
+        'Samples affected', 
+        'Observation - Category', 
+        'Page', 
+        'Sub-category of Observation'
+    ])
+    
+    # Group by similar differences
+    diff_groups = {}
+    for idx, row in comparison_df.iterrows():
+        if row['Comparison'] == 'DIFFERENT':
+            # Create key based on the type of difference
+            # We'll use NLP categorization in a more sophisticated version
+            difference_text = row['Difference'].lower()
+            
+            # Basic categorization logic
+            category = ""
+            page = ""
+            sub_category = row['Difference']
+            
+            # Determine category based on keywords in the difference
+            if 'address' in difference_text:
+                category = "Mismatch of content between Filed Copy and customer copy"
+                page = "Address & Contact Details of Ombudsman Centres"
+            elif 'missing' in difference_text:
+                category = "Available in Filed Copy but missing in Customer Copy"
+                if 'address' in difference_text or 'contact' in difference_text:
+                    page = "Tnc (Ombudsman Address)"
+                elif 'annexure' in difference_text:
+                    page = "Tnc (Annexure AA,BB &CC)"
+            elif 'policy' in difference_text or 'quotation' in difference_text:
+                category = "Mismatch of content between Filed Copy and customer copy"
+                page = "CIS"
+            elif 'heading' in difference_text:
+                category = "Mismatch of content between Filed Copy and customer copy"
+                page = "Forwarding Letter"
+            elif 'period' in difference_text or 'freelook' in difference_text:
+                category = "Mismatch of content between Filed Copy and customer copy"
+                page = "Forwarding Letter"
+            else:
+                category = "Other discrepancy"
+                page = "Unknown"
+            
+            # Create group key
+            group_key = f"{category}|{page}"
+            
+            # Add to group
+            if group_key not in diff_groups:
+                diff_groups[group_key] = {
+                    'samples': set(),
+                    'sub_categories': set()
+                }
+            
+            # Add sample ID and sub-category
+            sample_id = str(row.get('SampleID', idx))
+            diff_groups[group_key]['samples'].add(sample_id)
+            diff_groups[group_key]['sub_categories'].add(sub_category)
+    
+    # Convert groups to structured findings
+    findings_rows = []
+    for group_key, group_data in diff_groups.items():
+        category, page = group_key.split('|')
+        samples = ', '.join(sorted(group_data['samples']))
+        sub_categories = '\n'.join(group_data['sub_categories'])
+        
+        # Use "All Samples" if many samples are affected
+        if len(group_data['samples']) > 5:
+            samples = "All Samples"
+        
+        findings_rows.append({
+            'Samples affected': samples,
+            'Observation - Category': category,
+            'Page': page,
+            'Sub-category of Observation': sub_categories
+        })
+    
+    # Convert to DataFrame
+    if findings_rows:
+        findings_df = pd.DataFrame(findings_rows)
+    
+    return findings_df
+
+def categorize_with_llm(comparison_df, api_key):
+    """
+    Uses LLM to categorize differences into structured format.
+    This provides more sophisticated categorization than rule-based approach.
     """
     chatgroq_llm = ChatGroq(
         api_key=api_key,
         model_name="Llama3-8b-8192"
     )
     
+    # Filter only rows with differences
+    diff_rows = comparison_df[comparison_df['Comparison'] == 'DIFFERENT']
+    
+    if diff_rows.empty:
+        return pd.DataFrame(columns=[
+            'Samples affected', 
+            'Observation - Category', 
+            'Page', 
+            'Sub-category of Observation'
+        ])
+    
+    # Prepare the prompt
     prompt = """
-    Based on the following document comparison results, create a structured table in the following format:
+    Analyze the following document comparison differences and categorize them into a structured format. 
+    For each difference, determine:
+    1. What category of observation it belongs to (e.g., "Mismatch of content between Filed Copy and customer copy", "Available in Filed Copy but missing in Customer Copy")
+    2. Which page/section it relates to (e.g., "Forwarding Letter", "CIS", "Address & Contact Details of Ombudsman Centres")
+    3. A specific sub-category description of the observation
     
-    | Product UID | Samples affected | Observation - Category | Page | Sub-category of Observation |
-    
-    For each difference identified, categorize it into one of these observation types:
-    - Mismatch of content between Filed Copy and customer copy
-    - Available in Filed Copy but missing in Customer Copy
-    - Document specification differences
-    
-    Here are the comparison results:
+    Here are the differences:
     """
     
-    # Add all comparison results to the prompt
-    for index, result in comparison_results.iterrows():
-        if result.get('Comparison') == 'DIFFERENT':
-            prompt += f"\nSection: {result['Section']}\n"
-            prompt += f"Company Line: {result['CompanyLine']}\n"
-            prompt += f"Customer Line: {result['CustomerLine']}\n"
-            prompt += f"Difference: {result.get('Difference', '')}\n"
-            prompt += "---\n"
+    for idx, row in diff_rows.iterrows():
+        sample_id = row.get('SampleID', idx)
+        prompt += f"\nSample {sample_id}: {row['Difference']}"
     
-    # Ask the LLM to format in the desired structure
-    prompt += "\nPlease organize these differences into the table format shown above."
+    prompt += """
     
-    # Call LLM
-    with st.spinner("Generating structured summary..."):
+    Return a JSON array where each object represents a group of similar differences with the following structure:
+    {
+        "samples_affected": ["sample1", "sample2", ...], 
+        "observation_category": "Category name",
+        "page": "Page name",
+        "sub_category": "Detailed description of the observation"
+    }
+    
+    Group similar differences together. If many samples (more than 5) have the same issue, use "All Samples" for samples_affected.
+    """
+    
+    with st.spinner("Using LLM to categorize findings..."):
         response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
     
-    return response
-
-def process_documents(company_docx, customer_docx, checklist_path, output_excel_path, company_faiss_path, customer_faiss_path, api_key):
-    """
-    Main function to process and compare documents
-    """
-    # Step 1: Store sections from both documents in FAISS using the checklist markers
-    with st.spinner("Analyzing company document..."):
-        store_sections_in_faiss(company_docx, checklist_path, company_faiss_path)
-    
-    with st.spinner("Analyzing customer document..."):
-        store_sections_in_faiss(customer_docx, checklist_path, customer_faiss_path)
-
-    # Read checklist file
-    checklist_df = pd.read_excel(checklist_path)
-    final_rows = []
-
-    # Process each checklist entry
-    with st.spinner("Processing document sections..."):
-        progress_bar = st.progress(0)
-        total_sections = len(checklist_df)
+    try:
+        # Extract JSON from response (it might be wrapped in markdown code blocks)
+        json_match = re.search(r'```json\n(.*?)\n```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = response
         
-        for i, row in checklist_df.iterrows():
-            section_name = row['PageName'].strip().lower()
-            start_marker = preprocess_text(row['StartMarker'])
-            end_marker = preprocess_text(row['EndMarker'])
-            
-            company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss_path)
-            customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss_path)
-
-            if not company_section or not customer_section:
-                st.warning(f"Could not retrieve sections for {section_name}")
-                continue
-
-            company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
-                            line.strip() and "[TABLE]" not in line]
-            customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
-                            line.strip() and "[TABLE]" not in line]
-
-            for comp_line in company_lines:
-                best_cust_line = find_best_line_match(comp_line, customer_lines)
-                final_rows.append({
-                    "Section": section_name,
-                    "CompanyLine": comp_line,
-                    "CustomerLine": best_cust_line
-                })
-            
-            # Update progress
-            progress_bar.progress((i + 1) / total_sections)
-
-    df = pd.DataFrame(final_rows).drop_duplicates()
-    df["order"] = df.index
-    same_rows = []
-    different_rows = []
-
-    # First-pass comparison
-    with st.spinner("Performing initial comparison..."):
-        for idx, row in df.iterrows():
-            norm_company = row["CompanyLine"].lower().replace(" ", "")
-            norm_customer = row["CustomerLine"].lower().replace(" ", "")
-            if norm_company == norm_customer:
-                same_rows.append({**row, "Comparison": "SAME"})
-            elif norm_company in norm_customer:
-                same_rows.append({**row, "Comparison": "SAME"})
-            elif norm_customer == "":
-                same_rows.append({**row, "Comparison": "DIFFERENT", "Difference": "Could not find similar line in customer document"})
+        # Parse the JSON
+        categories = json.loads(json_str)
+        
+        # Convert to DataFrame
+        findings_rows = []
+        for cat in categories:
+            samples = cat.get('samples_affected', [])
+            if isinstance(samples, list) and len(samples) > 0:
+                samples_str = ', '.join(samples) if samples[0] != "All Samples" else "All Samples"
             else:
-                different_rows.append(row)
+                samples_str = "Unknown"
+                
+            findings_rows.append({
+                'Samples affected': samples_str,
+                'Observation - Category': cat.get('observation_category', 'Other'),
+                'Page': cat.get('page', 'Unknown'),
+                'Sub-category of Observation': cat.get('sub_category', '')
+            })
+        
+        findings_df = pd.DataFrame(findings_rows)
+        return findings_df
+        
+    except Exception as e:
+        st.error(f"Error parsing LLM categorization response: {e}")
+        st.code(response)
+        # Fall back to rule-based categorization
+        return categorize_differences(comparison_df)
 
-    df_same = pd.DataFrame(same_rows)
-    df_different = pd.DataFrame(different_rows)
-    
-    st.info(f"Initial analysis: {df_same.shape[0]} identical lines, {df_different.shape[0]} differences requiring detailed comparison")
-
-    # Detailed LLM-based comparison for different lines
-    if not df_different.empty:
-        df_diff_compared = compare_dataframe(df_different, api_key, batch_size=50)
+def generate_structured_findings(comparison_df, api_key=None):
+    """
+    Uses LLM to enhance categorization of differences and format them 
+    into the structured Excel template format.
+    """
+    if api_key:
+        # Use LLM for more sophisticated categorization
+        llm_categorized = categorize_with_llm(comparison_df, api_key)
+        return llm_categorized
     else:
-        df_diff_compared = df_different.copy()
+        # Use rule-based categorization
+        return categorize_differences(comparison_df)
 
-    # Merge the results
-    df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
-    df_final = df_final.drop(columns=["order"])
+# STREAMLIT UI
+def main():
+    st.title("Document Comparison Tool")
     
-    # Save to Excel
-    df_final.to_excel(output_excel_path, index=False)
-    st.success(f"Comparison results saved to Excel")
+    # Initialize session state
+    if 'comparison_results' not in st.session_state:
+        st.session_state['comparison_results'] = None
+    if 'findings_report' not in st.session_state:
+        st.session_state['findings_report'] = None
     
-    return df_final
-
-# Streamlit UI
-st.title("Document Comparison Tool")
-st.markdown("""
-This tool analyzes and compares two document versions, highlighting differences and generating a structured report.
-""")
-
-# File Upload Area
-st.header("Upload Documents")
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    company_doc = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
+    # Create tabs for different sections
+    tabs = st.tabs(["Document Comparison", "Structured Findings", "Settings"])
     
-with col2:
-    customer_doc = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
-    
-with col3:
-    checklist_file = st.file_uploader("Upload Checklist (XLSX)", type=["xlsx"])
-
-# API Key Input
-groq_api_key = st.text_input("Enter Groq API Key", value="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", type="password")
-
-# Process Button
-if st.button("Compare Documents", disabled=not (company_doc and customer_doc and checklist_file)):
-    if not groq_api_key:
-        st.error("Please enter a valid Groq API key")
-    else:
-        # Save uploaded files to temp directory
-        company_path = os.path.join(temp_dir.name, "company.docx")
-        customer_path = os.path.join(temp_dir.name, "customer.docx")
-        checklist_path = os.path.join(temp_dir.name, "checklist.xlsx")
+    with tabs[0]:
+        st.header("Document Comparison")
         
-        with open(company_path, "wb") as f:
-            f.write(company_doc.getvalue())
+        # File upload section
+        st.subheader("Upload Documents")
+        col1, col2, col3 = st.columns(3)
         
-        with open(customer_path, "wb") as f:
-            f.write(customer_doc.getvalue())
+        with col1:
+            company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
         
-        with open(checklist_path, "wb") as f:
-            f.write(checklist_file.getvalue())
+        with col2:
+            customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
         
-        # Set paths for output and FAISS indices
-        company_faiss_path = os.path.join(temp_dir.name, "company_faiss.pkl")
-        customer_faiss_path = os.path.join(temp_dir.name, "customer_faiss.pkl")
-        output_excel_path = os.path.join(temp_dir.name, "comparison_results.xlsx")
+        with col3:
+            checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
         
-        # Process documents
-        with st.spinner("Processing documents... This may take a few minutes."):
-            try:
-                comparison_df = process_documents(
-                    company_path, 
-                    customer_path, 
-                    checklist_path, 
-                    output_excel_path, 
-                    company_faiss_path, 
-                    customer_faiss_path,
-                    groq_api_key
+        # Process files if uploaded
+        if company_file and customer_file and checklist_file:
+            # Save uploaded files to temp directory
+            company_path = os.path.join(temp_dir.name, "company.docx")
+            customer_path = os.path.join(temp_dir.name, "customer.docx")
+            checklist_path = os.path.join(temp_dir.name, "checklist.xlsx")
+            
+            with open(company_path, "wb") as f:
+                f.write(company_file.getvalue())
+            with open(customer_path, "wb") as f:
+                f.write(customer_file.getvalue())
+            with open(checklist_path, "wb") as f:
+                f.write(checklist_file.getvalue())
+            
+            # Create output directory for indices
+            index_dir = os.path.join(temp_dir.name, "indices")
+            os.makedirs(index_dir, exist_ok=True)
+            
+            company_index_path = os.path.join(index_dir, "company_index.pkl")
+            customer_index_path = os.path.join(index_dir, "customer_index.pkl")
+            
+            # Process button
+            if st.button("Process Documents"):
+                with st.spinner("Processing documents..."):
+                    # Store sections in FAISS indices
+                    company_index = store_sections_in_faiss(company_path, checklist_path, company_index_path)
+                    customer_index = store_sections_in_faiss(customer_path, checklist_path, customer_index_path)
+                    
+                    # Read checklist
+                    checklist_df = pd.read_excel(checklist_path)
+                    
+                    # Compare sections
+                    comparison_data = []
+                    for _, row in checklist_df.iterrows():
+                        page_name = row['PageName'].strip().lower()
+                        start_marker = preprocess_text(row['StartMarker'])
+                        end_marker = preprocess_text(row['EndMarker'])
+                        
+                        company_sections = retrieve_section(page_name, start_marker, end_marker, company_index_path)
+                        customer_sections = retrieve_section(page_name, start_marker, end_marker, customer_index_path)
+                        
+                        if company_sections and customer_sections:
+                            company_text = company_sections[0]['text']
+                            customer_text = customer_sections[0]['text']
+                            
+                            # Get lines
+                            company_lines = split_text_into_lines(company_text)
+                            customer_lines = split_text_into_lines(customer_text)
+                            
+                            # Line-by-line comparison
+                            for i, line in enumerate(company_lines):
+                                if line.strip():
+                                    best_match = find_best_line_match(line, customer_lines)
+                                    comparison_data.append({
+                                        'PageName': page_name,
+                                        'SampleID': f"{page_name}_{i}",
+                                        'CompanyLine': line,
+                                        'CustomerLine': best_match
+                                    })
+                    
+                    # Create comparison dataframe
+                    comparison_df = pd.DataFrame(comparison_data)
+                    
+                    # Check if Groq API key is set
+                    api_key = st.session_state.get('groq_api_key', '')
+                    if not api_key:
+                        st.warning("Groq API key not set. Please set it in the Settings tab.")
+                        st.session_state['comparison_results'] = comparison_df
+                    else:
+                        # Use LLM for detailed comparison
+                        comparison_df = compare_dataframe(comparison_df, api_key)
+                        st.session_state['comparison_results'] = comparison_df
+                    
+                    st.success("Document comparison completed!")
+            
+            # Display comparison results if available
+            if st.session_state['comparison_results'] is not None:
+                st.subheader("Comparison Results")
+                
+                # Filter options
+                filter_options = st.multiselect(
+                    "Filter by comparison result:",
+                    ['SAME', 'DIFFERENT', 'N/A'],
+                    default=['DIFFERENT']
                 )
                 
-                # Create structured table from results
-                structured_output = format_to_structured_table(comparison_df, groq_api_key)
+                filtered_df = st.session_state['comparison_results']
+                if filter_options:
+                    filtered_df = filtered_df[filtered_df['Comparison'].isin(filter_options)]
                 
-                # Display results
-                st.header("Comparison Results")
+                st.dataframe(filtered_df)
                 
-                # Display structured summary
-                st.subheader("Structured Summary")
-                st.markdown(structured_output)
-                
-                # Display raw comparison data
-                st.subheader("Detailed Comparison")
-                st.dataframe(
-                    comparison_df,
-                    column_config={
-                        "Section": st.column_config.TextColumn("Section"),
-                        "CompanyLine": st.column_config.TextColumn("Company Document"),
-                        "CustomerLine": st.column_config.TextColumn("Customer Document"),
-                        "Comparison": st.column_config.TextColumn("Comparison"),
-                        "Difference": st.column_config.TextColumn("Explanation")
-                    },
-                    use_container_width=True
+                # Download button for CSV
+                csv = filtered_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "Download Comparison Results (CSV)",
+                    data=csv,
+                    file_name="document_comparison_results.csv",
+                    mime="text/csv"
                 )
+    
+    with tabs[1]:
+        st.header("Structured Findings Report")
+        
+        if 'comparison_results' not in st.session_state or st.session_state['comparison_results'] is None:
+            st.warning("Please run a document comparison first before generating findings.")
+        else:
+            # Get comparison results from session state
+            df = st.session_state['comparison_results']
+            
+            # Check if we have API key for LLM categorization
+            use_llm = False
+            api_key = st.session_state.get('groq_api_key', '')
+            
+            if api_key:
+                use_llm = st.checkbox("Use LLM for advanced categorization", value=True)
+            
+            if st.button("Generate Structured Findings Report"):
+                findings_df = generate_structured_findings(df, api_key if use_llm else None)
                 
-                # Download buttons
-                col1, col2 = st.columns(2)
+                st.session_state['findings_report'] = findings_df
                 
-                with col1:
-                    with open(output_excel_path, "rb") as f:
-                        excel_data = f.read()
+                # Display the findings
+                st.subheader("Structured Findings")
+                st.dataframe(findings_df)
+                
+                # Add download button for Excel
+                if not findings_df.empty:
+                    # Create Excel file with styling
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        findings_df.to_excel(writer, index=False, sheet_name='Findings')
+                        
+                        # Get the workbook and worksheet
+                        workbook = writer.book
+                        worksheet = writer.sheets['Findings']
+                        
+                        # Add styling
+                        from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
+                        
+                        # Header styling
+                        header_fill = PatternFill(start_color='00CCFFFF', end_color='00CCFFFF', fill_type='solid')
+                        for cell in worksheet[1]:
+                            cell.fill = header_fill
+                            cell.font = Font(bold=True)
+                        
+                        # Column width
+                        for col in worksheet.columns:
+                            max_length = 0
+                            column = col[0].column_letter
+                            for cell in col:
+                                if cell.value:
+                                    max_length = max(max_length, len(str(cell.value)))
+                            adjusted_width = (max_length + 2) * 1.2
+                            worksheet.column_dimensions[column].width = min(adjusted_width, 50)
+                    
+                    excel_data = excel_buffer.getvalue()
                     st.download_button(
-                        label="Download Excel Report",
+                        label="Download Findings Report (Excel)",
                         data=excel_data,
-                        file_name="document_comparison.xlsx",
+                        file_name="document_comparison_findings.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                
-                with col2:
-                    st.download_button(
-                        label="Download Structured Summary",
-                        data=structured_output,
-                        file_name="structured_summary.md",
-                        mime="text/markdown"
-                    )
-                
-            except Exception as e:
-                st.error(f"An error occurred during processing: {str(e)}")
-
-# Cleanup on session end
-def cleanup():
-    temp_dir.cleanup()
-
-# Register cleanup function
-st.session_state.setdefault("cleanup_registered", False)
-if not st.session_state["cleanup_registered"]:
-    st.session_state["cleanup_registered"] = True
-    import atexit
-    atexit.register(cleanup)
-
-# Footer
-st.markdown("---")
-st.markdown("Document Comparison Tool © 2025")
+            
+            # Display existing findings if available
+            if 'findings_report' in st.session_state and st.session_state['findings_report'] is not None:
+                if st.session_state['findings_report'].empty:
+                    st.info("No differences found that require reporting.")
+                else:
+                    st.subheader("Current Findings Report")
+                    st.dataframe(st.session_state['findings_report'])
+    
+    with tabs[2]:
+        st.header("Settings")
+        
+        st.subheader("API Configuration")
+        api_key = st.text_input(
+            "Groq API Key",
+            value=st.session_state.get('groq_api_key', ''),
+            type="password",
+            help="Enter your Groq API key for LLM-powered comparison"
+        )
+        
+        if api_key:
+            st.session_state['groq_api_key'] = api_key
+            st.success("API Key saved!")
+        
+        st.subheader("Advanced Settings")
+        batch_size = st.slider(
+            "LLM Processing Batch Size",
+            min_value=10,
+            max_value=100,
+            value=50,
+            step=10,
+            help="Number of lines to process in each LLM batch"
+        )
+        st.session_state['batch_size'] = batch_size
+        
+        # Clear session data
+        if st.button("Clear All Data"):
+            for key in list(st.session_state.keys()):
+                if key != 'groq_api_key':  # Keep API
