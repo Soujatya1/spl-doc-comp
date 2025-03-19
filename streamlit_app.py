@@ -553,13 +553,26 @@ def main():
             company_path = os.path.join(temp_dir.name, "company.docx")
             customer_path = os.path.join(temp_dir.name, "customer.docx")
             checklist_path = os.path.join(temp_dir.name, "checklist.xlsx")
+    
+            # Make sure the temp directory exists
+            os.makedirs(temp_dir.name, exist_ok=True)
+    
+            # Write files with proper error handling
+            try:
+                with open(company_path, "wb") as f:
+                    f.write(company_file.getvalue())
+                with open(customer_path, "wb") as f:
+                    f.write(customer_file.getvalue())
+                with open(checklist_path, "wb") as f:
+                    f.write(checklist_file.getvalue())
             
-            with open(company_path, "wb") as f:
-                f.write(company_file.getvalue())
-            with open(customer_path, "wb") as f:
-                f.write(customer_file.getvalue())
-            with open(checklist_path, "wb") as f:
-                f.write(checklist_file.getvalue())
+        # Verify files were saved correctly
+        if not os.path.exists(company_path) or not os.path.exists(customer_path) or not os.path.exists(checklist_path):
+            st.error("Error saving uploaded files. Please try again.")
+        else:
+            st.success("Files uploaded successfully!")
+    except Exception as e:
+        st.error(f"Error saving files: {str(e)}")
             
             # Create output directory for indices
             index_dir = os.path.join(temp_dir.name, "indices")
