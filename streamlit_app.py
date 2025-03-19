@@ -291,7 +291,14 @@ def process_batch(df_batch, api_key):
         return []
     
     try:
-        comparisons = json.loads(response)
+        # Try to extract JSON from the response (in case there's additional text)
+        json_start = response.find("[")
+        json_end = response.rfind("]") + 1
+        if json_start >= 0 and json_end > 0:
+            json_str = response[json_start:json_end]
+            comparisons = json.loads(json_str)
+        else:
+            comparisons = json.loads(response)
     except Exception as e:
         st.error(f"Error parsing LLM response: {e}")
         st.code(response)
@@ -317,15 +324,155 @@ def compare_dataframe(df, api_key, batch_size=50):
             all_comparisons.extend(comparisons)
             
             # Update progress
-            progress_bar.progress((i + batch_size) / len(df))
+            progress_bar.progress(min(1.0, (i + batch_size) / len(df)))
+    
+    # Reset progress bar
+    progress_bar.empty()
     
     # Merge the comparisons back into the original DataFrame
-    df['Comparison'] = df.index.map(
-        lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
-    df['Difference'] = df.index.map(
-        lambda idx: next((item.get('difference', '') for item in all_comparisons if item['row'] == idx), ""))
+    df['Comparison'] = "N/A"
+    df['Difference'] = ""
+    
+    for comp in all_comparisons:
+        row_idx = comp.get('row')
+        if row_idx is not None and row_idx < len(df):
+            df.at[row_idx, 'Comparison'] = comp.get('comparison', 'N/A')
+            df.at[row_idx, 'Difference'] = comp.get('difference', '')
     
     return df
+
+# Streamlit UI components
+def main():
+    st.title("Document Comparison Tool")
+    
+    # Create tabs for different functionality
+    tab1, tab2, tab3 = st.tabs(["Document Processing", "Text Comparison", "Results"])
+    
+    # Session state initialization
+    if 'processed_docx' not in st.session_state:
+        st.session_state.processed_docx = False
+    if 'comparison_ready' not in st.session_state:
+        st.session_state.comparison_ready = False
+    if 'comparison_results' not in st.session_state:
+        st.session_state.comparison_results = None
+    if 'faiss_index_path' not in st.session_state:
+        st.session_state.faiss_index_path = os.path.join(temp_dir.name, "faiss_index.pkl")
+    
+    with tab1:
+        st.header("Document Processing")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            docx_file = st.file_uploader("Upload DOCX Document", type=["docx"])
+        
+        with col2:
+            checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
+        
+        if docx_file and checklist_file:
+            if st.button("Process Documents"):
+                with st.spinner("Processing documents..."):
+                    # Save uploaded files to temp directory
+                    docx_path = os.path.join(temp_dir.name, "document.docx")
+                    checklist_path = os.path.join(temp_dir.name, "checklist.xlsx")
+                    
+                    with open(docx_path, "wb") as f:
+                        f.write(docx_file.getvalue())
+                    
+                    with open(checklist_path, "wb") as f:
+                        f.write(checklist_file.getvalue())
+                    
+                    # Process and store sections
+                    store_sections_in_faiss(
+                        docx_path, 
+                        checklist_path, 
+                        st.session_state.faiss_index_path
+                    )
+                    
+                    st.session_state.processed_docx = True
+                    st.success("Documents processed successfully!")
+    
+    with tab2:
+        st.header("Text Comparison")
+        
+        if not st.session_state.processed_docx:
+            st.info("Please process documents in the Document Processing tab first.")
+        else:
+            # API key input
+            api_key = st.text_input("Enter Groq API Key", type="password")
+            
+            # Upload comparison file
+            comparison_file = st.file_uploader("Upload Comparison File (Excel)", type=["xlsx", "xls"])
+            
+            if comparison_file and api_key:
+                if st.button("Run Comparison"):
+                    with st.spinner("Loading comparison data..."):
+                        comparison_df = pd.read_excel(comparison_file)
+                        
+                        # Check if required columns exist
+                        required_cols = ["CompanyLine", "CustomerLine"]
+                        if not all(col in comparison_df.columns for col in required_cols):
+                            st.error(f"Comparison file must contain columns: {', '.join(required_cols)}")
+                        else:
+                            # Run comparison
+                            batch_size = st.slider("Batch Size", min_value=10, max_value=100, value=50)
+                            result_df = compare_dataframe(comparison_df, api_key, batch_size=batch_size)
+                            
+                            # Store results in session state
+                            st.session_state.comparison_results = result_df
+                            st.session_state.comparison_ready = True
+                            
+                            st.success("Comparison completed! View results in the Results tab.")
+    
+    with tab3:
+        st.header("Results")
+        
+        if not st.session_state.comparison_ready:
+            st.info("Run a comparison in the Text Comparison tab to see results here.")
+        else:
+            # Display comparison results
+            results_df = st.session_state.comparison_results
+            
+            # Filter options
+            st.subheader("Filter Results")
+            comparison_filter = st.selectbox(
+                "Filter by Comparison",
+                ["All", "SAME", "DIFFERENT", "N/A"]
+            )
+            
+            # Apply filters
+            filtered_df = results_df
+            if comparison_filter != "All":
+                filtered_df = filtered_df[filtered_df["Comparison"] == comparison_filter]
+            
+            # Display filtered results
+            st.subheader("Comparison Results")
+            st.dataframe(filtered_df)
+            
+            # Download option
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="Download Results as CSV",
+                data=csv,
+                file_name="comparison_results.csv",
+                mime="text/csv"
+            )
+            
+            # Summary statistics
+            st.subheader("Summary")
+            total = len(results_df)
+            same = len(results_df[results_df["Comparison"] == "SAME"])
+            different = len(results_df[results_df["Comparison"] == "DIFFERENT"])
+            na = len(results_df[results_df["Comparison"] == "N/A"])
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Comparisons", total)
+            col2.metric("Same", same, f"{same/total*100:.1f}%" if total > 0 else "0%")
+            col3.metric("Different", different, f"{different/total*100:.1f}%" if total > 0 else "0%")
+
+# Run the main function when the script is executed
+if __name__ == "__main__":
+    main()
 
 # NEW FUNCTIONS FOR STRUCTURED FINDINGS
 
