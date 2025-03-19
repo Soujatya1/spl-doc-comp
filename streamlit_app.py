@@ -748,4 +748,9 @@ def main():
         # Clear session data
         if st.button("Clear All Data"):
             for key in list(st.session_state.keys()):
-                if key != 'groq_api_key':  # Keep API
+                if key != 'groq_api_key':
+                    del st.session_state[key]
+            st.success("All data scleared")
+
+if __name__ == "__main__":
+    main()
