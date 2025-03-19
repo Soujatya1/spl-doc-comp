@@ -566,13 +566,13 @@ def main():
                 with open(checklist_path, "wb") as f:
                     f.write(checklist_file.getvalue())
             
-        # Verify files were saved correctly
-        if not os.path.exists(company_path) or not os.path.exists(customer_path) or not os.path.exists(checklist_path):
-            st.error("Error saving uploaded files. Please try again.")
-        else:
-            st.success("Files uploaded successfully!")
-    except Exception as e:
-        st.error(f"Error saving files: {str(e)}")
+                # Verify files were saved correctly
+                if not os.path.exists(company_path) or not os.path.exists(customer_path) or not os.path.exists(checklist_path):
+                    st.error("Error saving uploaded files. Please try again.")
+                else:
+                    st.success("Files uploaded successfully!")
+            except Exception as e:
+                st.error(f"Error saving files: {str(e)}")
             
             # Create output directory for indices
             index_dir = os.path.join(temp_dir.name, "indices")
