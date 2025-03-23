@@ -1,11 +1,10 @@
 import streamlit as st
-import os
 import pandas as pd
 import re
 import unicodedata
+import os
 import pickle
-from difflib import SequenceMatcher
-from rapidfuzz import fuzz, process
+import tempfile
 from docx import Document
 from docx.document import Document as _Document
 from docx.table import Table
@@ -13,15 +12,19 @@ from docx.text.paragraph import Paragraph
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.docstore.document import Document as LangchainDocument
-import json
-import tempfile
+from difflib import SequenceMatcher
+from rapidfuzz import fuzz, process
+from langchain_groq import ChatGroq
 
-# Set page configuration
-st.set_page_config(
-    page_title="Document Comparison Tool",
-    page_icon="📄",
-    layout="wide"
-)
+# Set page config
+st.set_page_config(page_title="Document Comparison Tool", layout="wide")
+
+# Create temp directory for storing files
+@st.cache_resource
+def get_temp_dir():
+    return tempfile.mkdtemp()
+
+temp_dir = get_temp_dir()
 
 # Helper functions
 def preprocess_text(text):
@@ -49,19 +52,19 @@ def iter_block_items(parent):
         elif child.tag.endswith("tbl"):
             yield Table(child, parent)
 
-def extract_text_by_sections(docx_file):
+def extract_text_by_sections(docx_path):
     """
     Extracts paragraphs and tables from a DOCX file while maintaining document order.
     Returns a list of dictionaries with keys: section, text, type, and order.
     When a heading (style containing "heading") is encountered, the current section is updated.
     """
     extracted_data = []
-    doc = Document(docx_file)
+    doc = Document(docx_path)
     current_section = "unknown_section"
     order_counter = 0
 
     for block in iter_block_items(doc):
-        if isinstance(block, Paragraph):
+        if block.__class__.__name__ == "Paragraph":
             para_text = preprocess_text(block.text)
             if block.style and "heading" in block.style.name.lower() and para_text:
                 current_section = para_text
@@ -73,7 +76,7 @@ def extract_text_by_sections(docx_file):
                     "order": order_counter
                 })
                 order_counter += 1
-        elif isinstance(block, Table):
+        elif block.__class__.__name__ == "Table":
             table_data = []
             for row in block.rows:
                 row_cells = [preprocess_text(cell.text.strip()) for cell in row.cells]
@@ -88,6 +91,75 @@ def extract_text_by_sections(docx_file):
                 })
                 order_counter += 1
     return extracted_data
+
+def find_closest_match(target, text_list, threshold=0.65):
+    target = target.lower()
+    best_match = None
+    best_score = threshold
+    for text in text_list:
+        lower_text = text.lower()
+        if target in lower_text:
+            return text
+        score = SequenceMatcher(None, target, lower_text).ratio()
+        if score > best_score:
+            best_score = score
+            best_match = text
+    return best_match
+
+def extract_section(extracted_data, start_marker, end_marker):
+    """Sorts extracted data by order, combines text, splits into lines, then extracts substring between best matching markers."""
+    if not extracted_data:
+        return ""
+    sorted_data = sorted(extracted_data, key=lambda d: d.get("order", 0))
+    combined_text = "\n".join([item["text"] for item in sorted_data])
+    lines = combined_text.split("\n")
+    best_start = find_closest_match(start_marker, lines)
+    best_end = find_closest_match(end_marker, lines)
+
+    if not best_start or not best_end:
+        st.warning(f"Could not find {start_marker} or {end_marker}")
+        return combined_text
+    try:
+        start_idx = lines.index(best_start)
+        end_idx = lines.index(best_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        return "\n".join(lines[start_idx:end_idx+1])
+    except ValueError:
+        return combined_text
+
+def store_sections_in_faiss(docx_path, checklist_df, progress_bar=None):
+    """
+    Reads the DOCX file, extracts sections based on the checklist (PageName, StartMarker, EndMarker),
+    creates Document objects with metadata, and stores them in a FAISS vector store.
+    """
+    extracted_data = extract_text_by_sections(docx_path)
+    sections = []
+    
+    total_rows = len(checklist_df)
+    for idx, row in checklist_df.iterrows():
+        if progress_bar:
+            progress_bar.progress((idx + 1) / total_rows)
+            
+        section_name = row['PageName'].strip().lower()
+        start_marker = preprocess_text(row['StartMarker'])
+        end_marker = preprocess_text(row['EndMarker'])
+        section_text = extract_section(extracted_data, start_marker, end_marker)
+        if section_text:
+            metadata = {
+                "section": section_name,
+                "start": start_marker,
+                "end": end_marker,
+                "source": os.path.basename(docx_path)
+            }
+            doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
+            sections.append(doc_obj)
+            
+    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    faiss_index = FAISS.from_documents(sections, embedding_model)
+    # Attach documents for later retrieval
+    faiss_index.documents = sections
+    return faiss_index
 
 def split_text_into_lines(text):
     """Splits text into lines by newline or pipe symbol."""
@@ -122,25 +194,6 @@ def find_best_line_match(target, lines):
     else:
         return ""
 
-def find_closest_match(target, text_list, threshold=0.65):
-    """
-    Finds the closest matching string from a list using SequenceMatcher.
-    If the target is contained in a line, returns that line immediately.
-    Otherwise, returns the candidate whose similarity is above the threshold.
-    """
-    target = target.lower()
-    best_match = None
-    best_score = threshold
-    for text in text_list:
-        lower_text = text.lower()
-        if target in lower_text:
-            return text
-        score = SequenceMatcher(None, target, lower_text).ratio()
-        if score > best_score:
-            best_score = score
-            best_match = text
-    return best_match
-
 def extract_content_within_markers(text, start_marker, end_marker):
     """
     Splits the text into lines and uses fuzzy matching to find the best
@@ -163,72 +216,10 @@ def extract_content_within_markers(text, start_marker, end_marker):
         st.warning("Error finding marker indices; returning full text.")
         return text
 
-def extract_section(extracted_data, start_marker, end_marker):
-    """Sorts extracted data by order, combines text, splits into lines, then extracts substring between best matching markers."""
-    if not extracted_data:
-        return ""
-    sorted_data = sorted(extracted_data, key=lambda d: d.get("order", 0))
-    combined_text = "\n".join([item["text"] for item in sorted_data])
-    lines = combined_text.split("\n")
-    best_start = find_closest_match(start_marker, lines)
-    best_end = find_closest_match(end_marker, lines)
-
-    if not best_start or not best_end:
-        st.warning(f"Could not find markers: {start_marker} or {end_marker}")
-        return combined_text
-    try:
-        start_idx = lines.index(best_start)
-        end_idx = lines.index(best_end)
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-        return "\n".join(lines[start_idx:end_idx+1])
-    except ValueError:
-        return combined_text
-
-def store_sections_in_faiss(docx_data, checklist_df, temp_dir):
+def retrieve_section(page_name, start_marker, end_marker, faiss_index):
     """
-    Processes the DOCX data, extracts sections based on the checklist,
-    creates Document objects with metadata, and stores them in a FAISS vector store.
-    Returns the path to the saved FAISS index.
+    Retrieves all documents from the FAISS index whose metadata contains the specified criteria.
     """
-    extracted_data = extract_text_by_sections(docx_data)
-    sections = []
-    
-    for _, row in checklist_df.iterrows():
-        section_name = row['PageName'].strip().lower()
-        start_marker = preprocess_text(row['StartMarker'])
-        end_marker = preprocess_text(row['EndMarker'])
-        section_text = extract_section(extracted_data, start_marker, end_marker)
-        
-        if section_text:
-            metadata = {
-                "section": section_name,
-                "start": start_marker,
-                "end": end_marker,
-                "source": "uploaded_document"
-            }
-            doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
-            sections.append(doc_obj)
-    
-    # Create embeddings and FAISS index
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    faiss_index = FAISS.from_documents(sections, embedding_model)
-    faiss_index.documents = sections
-    
-    # Save to temporary file
-    faiss_path = os.path.join(temp_dir, "faiss_index.pkl")
-    with open(faiss_path, "wb") as f:
-        pickle.dump(faiss_index, f)
-    
-    return faiss_path
-
-def retrieve_section(page_name, start_marker, end_marker, faiss_index_path):
-    """
-    Loads the FAISS index from file and retrieves documents matching the section criteria.
-    """
-    with open(faiss_index_path, "rb") as f:
-        faiss_index = pickle.load(f)
-
     matching_sections = []
     # Iterate through all stored documents in the FAISS index
     for doc in faiss_index.documents:
@@ -245,7 +236,8 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index_path):
 
 def format_batch_prompt(df_batch):
     """
-    Converts a batch of DataFrame rows into a prompt string for LLM processing.
+    Converts a batch of DataFrame rows into a prompt string.
+    Each row is formatted with its row number, company line, and customer line.
     """
     prompt_lines = []
     for idx, row in df_batch.iterrows():
@@ -257,223 +249,253 @@ def format_batch_prompt(df_batch):
     prompt_text += (
         "\n\nCompare the above rows line by line. "
         "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Output JSON only."
+        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
     )
     return prompt_text
 
-def rule_based_comparison(df):
+def process_batch(df_batch, groq_api_key):
     """
-    A rule-based comparison function to use when LLM is not available.
+    Processes a batch of rows by creating a prompt, calling the LLM, and parsing the JSON response.
     """
-    for idx, row in df.iterrows():
-        comp_line = row["CompanyLine"].lower().replace(" ", "")
-        cust_line = row["CustomerLine"].lower().replace(" ", "")
+    import json
+    
+    prompt = format_batch_prompt(df_batch)
+    
+    # Initialize LLM with the API key
+    chatgroq_llm = ChatGroq(
+        api_key=groq_api_key,
+        model_name="Llama3-8b-8192"
+    )
+    
+    with st.spinner("Processing text comparison with LLM..."):
+        response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
+    
+    if not response.strip():
+        st.warning("Empty response from LLM.")
+        return []
+    
+    try:
+        comparisons = json.loads(response)
+    except Exception as e:
+        st.error(f"Error parsing LLM response: {e}")
+        st.code(response)
+        comparisons = []
         
-        if not cust_line:
-            df.at[idx, "Comparison"] = "DIFFERENT"
-            df.at[idx, "Difference"] = "Line missing in customer document"
-        elif comp_line == cust_line:
-            df.at[idx, "Comparison"] = "SAME"
-            df.at[idx, "Difference"] = ""
-        elif comp_line in cust_line or cust_line in comp_line:
-            df.at[idx, "Comparison"] = "SIMILAR"
-            df.at[idx, "Difference"] = "Content similar but not identical"
-        else:
-            df.at[idx, "Comparison"] = "DIFFERENT"
-            df.at[idx, "Difference"] = "Content differs"
+    return comparisons
+
+def compare_dataframe(df, groq_api_key, batch_size=50):
+    """
+    Splits the DataFrame into batches, processes each batch using the LLM for detailed comparison,
+    and maps the resulting comparison and difference back into the original DataFrame.
+    """
+    all_comparisons = []
+    
+    total_batches = (len(df) + batch_size - 1) // batch_size
+    
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    
+    # Split DataFrame into batches
+    for i in range(0, len(df), batch_size):
+        batch = df.iloc[i:i + batch_size]
+        comparisons = process_batch(batch, groq_api_key)
+        all_comparisons.extend(comparisons)
+        
+        # Update progress
+        progress_bar.progress((i + batch_size) / len(df) if i + batch_size < len(df) else 1.0)
+    
+    # Clear the progress bar
+    progress_bar.empty()
+
+    # Merge the comparisons back into the original DataFrame:
+    df['Comparison'] = df.index.map(
+        lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
+    df['Difference'] = df.index.map(
+        lambda idx: next((item.get('difference', '') for item in all_comparisons if item['row'] == idx), ""))
     
     return df
 
-def save_df_to_excel(df, output_path):
-    """Save DataFrame to Excel with formatting."""
-    df.to_excel(output_path, index=False)
-    return output_path
-
-def process_documents(company_data, customer_data, checklist_data, use_llm=False):
-    """
-    Main processing function that:
-    1. Creates temporary FAISS indexes for company and customer documents
-    2. Retrieves matching sections based on checklist
-    3. Compares lines between documents
-    4. Returns a DataFrame with comparison results
-    """
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Load checklist data
-        checklist_df = pd.read_excel(checklist_data)
-        
-        # Create FAISS indexes
-        st.info("Indexing company document...")
-        company_faiss_path = store_sections_in_faiss(company_data, checklist_df, temp_dir)
-        
-        st.info("Indexing customer document...")
-        customer_faiss_path = store_sections_in_faiss(customer_data, checklist_df, temp_dir)
-        
-        final_rows = []
-        
-        # Process each section from checklist
-        st.info("Comparing documents section by section...")
-        progress_bar = st.progress(0)
-        
-        for i, row in enumerate(checklist_df.iterrows()):
-            _, checklist_row = row
-            section_name = checklist_row['PageName'].strip().lower()
-            start_marker = preprocess_text(checklist_row['StartMarker'])
-            end_marker = preprocess_text(checklist_row['EndMarker'])
-            
-            company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss_path)
-            customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss_path)
-            
-            if not company_section or not customer_section:
-                st.warning(f"Could not retrieve sections for {section_name}")
-                continue
-            
-            company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) 
-                             if line.strip() and "[TABLE]" not in line]
-            customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) 
-                              if line.strip() and "[TABLE]" not in line]
-            
-            for comp_line in company_lines:
-                best_cust_line = find_best_line_match(comp_line, customer_lines)
-                final_rows.append({
-                    "Section": section_name,
-                    "CompanyLine": comp_line,
-                    "CustomerLine": best_cust_line
-                })
-            
-            # Update progress
-            progress_bar.progress((i + 1) / len(checklist_df))
-        
-        # Create DataFrame and perform comparisons
-        df = pd.DataFrame(final_rows).drop_duplicates()
-        df["order"] = df.index
-        
-        # Simple rule-based comparison for all rows
-        same_rows = []
-        different_rows = []
-        
-        for idx, row in df.iterrows():
-            norm_company = row["CompanyLine"].lower().replace(" ", "")
-            norm_customer = row["CustomerLine"].lower().replace(" ", "")
-            
-            if norm_company == norm_customer:
-                same_rows.append({**row, "Comparison": "SAME", "Difference": ""})
-            elif norm_company in norm_customer:
-                same_rows.append({**row, "Comparison": "SAME", "Difference": ""})
-            elif norm_customer == "":
-                same_rows.append({**row, "Comparison": "DIFFERENT", "Difference": "Could not find similar line in customer document"})
-            else:
-                different_rows.append(row)
-        
-        df_same = pd.DataFrame(same_rows)
-        df_different = pd.DataFrame(different_rows)
-        
-        # Use rule-based comparison instead of LLM
-        if not df_different.empty:
-            df_diff_compared = rule_based_comparison(df_different)
-        else:
-            df_diff_compared = df_different.copy()
-        
-        # Merge results and sort by original order
-        df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
-        df_final = df_final.drop(columns=["order"])
-        
-        return df_final
-
-# Streamlit UI
+# Main Streamlit app
 def main():
     st.title("Document Comparison Tool")
-    st.write("Compare two DOCX documents based on sections defined in a checklist Excel file.")
     
-    # File uploads
-    st.header("Upload Documents")
-    col1, col2, col3 = st.columns(3)
+    # Sidebar for file uploads and settings
+    with st.sidebar:
+        st.header("Upload Files")
+        company_file = st.file_uploader("Upload Company Document", type=["docx"])
+        customer_file = st.file_uploader("Upload Customer Document", type=["docx"])
+        checklist_file = st.file_uploader("Upload Checklist File", type=["xlsx"])
+        
+        st.header("API Settings")
+        groq_api_key = st.text_input("Enter Groq API Key", type="password", 
+                                     value="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")
+        
+        compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
     
-    with col1:
-        company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
+    # Main content
+    st.header("Document Comparison Results")
     
-    with col2:
-        customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
-    
-    with col3:
-        checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
-    
-    # Advanced options
-    with st.expander("Advanced Options"):
-        use_llm = st.checkbox("Use LLM for detailed comparison (requires API key)", value=False)
-        if use_llm:
-            api_key = st.text_input("Enter LLM API Key (e.g., Groq, OpenAI)", type="password")
-            st.warning("LLM integration is disabled in this version")
-    
-    # Process documents when all files are uploaded and button is clicked
-    if company_file and customer_file and checklist_file:
-        if st.button("Compare Documents"):
-            with st.spinner("Processing documents..."):
-                try:
-                    # Process documents
-                    result_df = process_documents(company_file, customer_file, checklist_file, use_llm=False)
-                    
-                    # Display results
-                    st.header("Comparison Results")
-                    
-                    # Summary metrics
-                    st.subheader("Summary")
-                    total_lines = len(result_df)
-                    same_lines = len(result_df[result_df['Comparison'] == 'SAME'])
-                    diff_lines = total_lines - same_lines
-                    
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Total Lines", total_lines)
-                    col2.metric("Matching Lines", same_lines)
-                    col3.metric("Different Lines", diff_lines)
-                    
-                    # Show the data with conditional formatting
-                    st.subheader("Detailed Results")
-                    
-                    # Apply styling to the dataframe
-                    def highlight_differences(s):
-                        return ['background-color: #ffcccc' if x == 'DIFFERENT' else 
-                                'background-color: #ffffcc' if x == 'SIMILAR' else
-                                'background-color: #ccffcc' for x in s]
-                    
-                    styled_df = result_df.style.apply(highlight_differences, subset=['Comparison'])
-                    st.dataframe(styled_df)
-                    
-                    # Option to download the results
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                        result_path = tmp.name
-                        save_df_to_excel(result_df, result_path)
-                    
-                    with open(result_path, 'rb') as f:
-                        st.download_button(
-                            "Download Results as Excel",
-                            f,
-                            file_name="document_comparison_results.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    
-                    # Clean up temporary file
-                    os.unlink(result_path)
-                    
-                except Exception as e:
-                    st.error(f"An error occurred during processing: {str(e)}")
-                    st.exception(e)
-    else:
-        st.info("Please upload all required files to proceed.")
+    if compare_btn:
+        if not groq_api_key:
+            st.error("Please enter a valid Groq API Key")
+            return
+            
+        # Save uploaded files to temp directory
+        company_path = os.path.join(temp_dir, "company.docx")
+        customer_path = os.path.join(temp_dir, "customer.docx")
+        checklist_path = os.path.join(temp_dir, "checklist.xlsx")
+        
+        with open(company_path, "wb") as f:
+            f.write(company_file.getbuffer())
+        with open(customer_path, "wb") as f:
+            f.write(customer_file.getbuffer())
+        with open(checklist_path, "wb") as f:
+            f.write(checklist_file.getbuffer())
+        
+        # Read checklist
+        checklist_df = pd.read_excel(checklist_path)
+        
+        # Create progress container
+        progress_container = st.container()
+        
+        with progress_container:
+            st.subheader("Processing Documents")
+            
+            # Store sections in FAISS
+            st.text("Storing company sections...")
+            company_progress = st.progress(0)
+            company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
+            
+            st.text("Storing customer sections...")
+            customer_progress = st.progress(0)
+            customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
+            
+            # Process each section
+            st.subheader("Comparing Sections")
+            final_rows = []
+            
+            for idx, row in checklist_df.iterrows():
+                section_name = row['PageName'].strip().lower()
+                start_marker = preprocess_text(row['StartMarker'])
+                end_marker = preprocess_text(row['EndMarker'])
+                
+                st.text(f"Processing section: {section_name}")
+                
+                company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss)
+                customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss)
+                
+                if not company_section or not customer_section:
+                    st.warning(f"Could not retrieve sections for {section_name}")
+                    continue
+                
+                company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
+                               line.strip() and "[TABLE]" not in line]
+                customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
+                                line.strip() and "[TABLE]" not in line]
+                
+                for comp_line in company_lines:
+                    best_cust_line = find_best_line_match(comp_line, customer_lines)
+                    final_rows.append({
+                        "Section": section_name,
+                        "CompanyLine": comp_line,
+                        "CustomerLine": best_cust_line
+                    })
+            
+            # Create DataFrame and perform initial filtering
+            df = pd.DataFrame(final_rows).drop_duplicates()
+            df["order"] = df.index
+            
+            st.text("Filtering similar and different rows...")
+            
+            same_rows = []
+            different_rows = []
+            
+            for idx, row in df.iterrows():
+                norm_company = row["CompanyLine"].lower().replace(" ", "")
+                norm_customer = row["CustomerLine"].lower().replace(" ", "")
+                
+                if norm_company == norm_customer:
+                    same_rows.append({**row, "Comparison": "SAME"})
+                elif norm_company in norm_customer:
+                    same_rows.append({**row, "Comparison": "SAME"})
+                elif norm_customer == "":
+                    same_rows.append({**row, "Comparison": "DIFFERENT", 
+                                     "Difference": "Could not find similar line in customer document"})
+                else:
+                    different_rows.append(row)
+            
+            df_same = pd.DataFrame(same_rows)
+            df_different = pd.DataFrame(different_rows)
+            
+            st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
+            
+            # Process different rows with LLM
+            if not df_different.empty:
+                st.text("Analyzing differences with LLM...")
+                df_diff_compared = compare_dataframe(df_different, groq_api_key, batch_size=10)
+            else:
+                df_diff_compared = df_different.copy()
+                
+            # Merge results
+            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
+            df_final = df_final.drop(columns=["order"])
+            
+            # Clear progress container
+            progress_container.empty()
+            
+            # Display results
+            st.subheader("Comparison Results")
+            
+            # Add filters
+            st.sidebar.header("Filters")
+            section_filter = st.sidebar.multiselect(
+                "Filter by Section",
+                options=df_final["Section"].unique(),
+                default=df_final["Section"].unique()
+            )
+            
+            comparison_filter = st.sidebar.multiselect(
+                "Filter by Comparison",
+                options=df_final["Comparison"].unique(),
+                default=df_final["Comparison"].unique()
+            )
+            
+            # Apply filters
+            filtered_df = df_final[
+                df_final["Section"].isin(section_filter) & 
+                df_final["Comparison"].isin(comparison_filter)
+            ]
+            
+            # Display stats
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Lines", len(df_final))
+                st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
+            with col2:
+                st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
+                st.metric("Filtered Results", len(filtered_df))
+            
+            # Display the table with conditional formatting
+            st.dataframe(
+                filtered_df.style.apply(
+                    lambda row: ['background-color: #ffcccc' if row['Comparison'] == 'DIFFERENT' else 'background-color: #ccffcc' for _ in row], 
+                    axis=1
+                ),
+                height=600
+            )
+            
+            # Export functionality
+            output_buffer = pd.ExcelWriter("comparison_results.xlsx", engine="xlsxwriter")
+            filtered_df.to_excel(output_buffer, index=False)
+            output_buffer.close()
+            
+            with open("comparison_results.xlsx", "rb") as f:
+                st.download_button(
+                    label="Download Results",
+                    data=f,
+                    file_name="document_comparison_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
-    # Add some help information
-    st.markdown("---")
-    with st.expander("How to use this tool"):
-        st.markdown("""
-        1. **Upload Company Document**: The original or reference document in DOCX format
-        2. **Upload Customer Document**: The document to compare against the company document
-        3. **Upload Checklist**: An Excel file with columns:
-           - PageName: Section name
-           - StartMarker: Text that marks the beginning of a section
-           - EndMarker: Text that marks the end of a section
-        4. Click **Compare Documents** to start the comparison process
-        5. Review the results and download the Excel report
-        """)
-
-# Run the app
 if __name__ == "__main__":
     main()
