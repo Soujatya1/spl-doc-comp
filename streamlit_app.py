@@ -16,6 +16,36 @@ from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
 
+# After saving uploaded files to temp directory
+company_path = os.path.join(temp_dir, "company.docx")
+customer_path = os.path.join(temp_dir, "customer.docx")
+checklist_path = os.path.join(temp_dir, "checklist.xlsx")
+
+try:
+    with open(company_path, "wb") as f:
+        f.write(company_file.getbuffer())
+    with open(customer_path, "wb") as f:
+        f.write(customer_file.getbuffer())
+    with open(checklist_path, "wb") as f:
+        f.write(checklist_file.getbuffer())
+    
+    # Verify files exist
+    if not os.path.exists(company_path):
+        st.error(f"Company file not found at {company_path}")
+        return
+    if not os.path.exists(customer_path):
+        st.error(f"Customer file not found at {customer_path}")
+        return
+    if not os.path.exists(checklist_path):
+        st.error(f"Checklist file not found at {checklist_path}")
+        return
+    
+    # Continue with processing...
+    
+except Exception as e:
+    st.error(f"Error saving files: {str(e)}")
+    return
+
 # Set page config
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
