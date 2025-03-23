@@ -32,13 +32,13 @@ try:
     # Verify files exist
     if not os.path.exists(company_path):
         st.error(f"Company file not found at {company_path}")
-        return
+        
     if not os.path.exists(customer_path):
         st.error(f"Customer file not found at {customer_path}")
-        return
+        
     if not os.path.exists(checklist_path):
         st.error(f"Checklist file not found at {checklist_path}")
-        return
+        
     
     # Continue with processing...
     
