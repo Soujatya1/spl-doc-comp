@@ -348,7 +348,7 @@ def main():
         
         st.header("API Settings")
         groq_api_key = st.text_input("Enter Groq API Key", type="password", 
-                                     value="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")
+                                     value="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")
         
         compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
     
