@@ -382,16 +382,14 @@ def generate_formatted_output(section_differences, groq_api_key):
         return []
     
     try:
-        # Try to clean the response in case there's any text before/after the JSON
         response_text = response.strip()
-        # Find JSON start and end
         start_idx = response_text.find('[')
         end_idx = response_text.rfind(']') + 1
         if start_idx >= 0 and end_idx > 0:
             json_text = response_text[start_idx:end_idx]
             formatted_output = json.loads(json_text)
         else:
-            formatted_output = json.loads(response_text)  # Try with the original text
+            formatted_output = json.loads(response_text)
     except Exception as e:
         st.error(f"Error parsing LLM format response: {e}")
         st.code(response)
@@ -399,12 +397,9 @@ def generate_formatted_output(section_differences, groq_api_key):
         
     return formatted_output
 
-# Function to save uploaded file to a temporary location
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
-        # Create a path in the temporary directory
         file_path = os.path.join(temp_dir, uploaded_file.name)
-        # Write the file
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         return file_path
@@ -414,7 +409,6 @@ def save_uploaded_file(uploaded_file):
 def main():
     st.title("Document Comparison Tool")
     
-    # Sidebar for file uploads and settings
     with st.sidebar:
         st.header("Upload Files")
         company_file = st.file_uploader("Upload Company Document", type=["docx"])
