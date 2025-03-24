@@ -340,52 +340,42 @@ def main():
         if not groq_api_key:
             st.error("Please enter a valid Groq API Key")
             return
-            
-        # Save uploaded files to temp directory
-        company_path = os.path.join(temp_dir, "company.docx")
-        customer_path = os.path.join(temp_dir, "customer.docx")
-        checklist_path = os.path.join(temp_dir, "checklist.xlsx")
         
-        try:
-            with open(company_path, "wb") as f:
-                f.write(company_file.getbuffer())
-            with open(customer_path, "wb") as f:
-                f.write(customer_file.getbuffer())
-            with open(checklist_path, "wb") as f:
-                f.write(checklist_file.getbuffer())
-            
-            # Verify files exist
-            if not os.path.exists(company_path):
-                st.error(f"Company file not found at {company_path}")
-                return
-            if not os.path.exists(customer_path):
-                st.error(f"Customer file not found at {customer_path}")
-                return
-            if not os.path.exists(checklist_path):
-                st.error(f"Checklist file not found at {checklist_path}")
-                return
-            
-        except Exception as e:
-            st.error(f"Error saving files: {str(e)}")
-            return
-        
-        # Read checklist
-        checklist_df = pd.read_excel(checklist_path)
-        
-        # Create progress container
+    # Read checklist directly
+        checklist_df = pd.read_excel(checklist_file)
+    
+    # Create progress container
         progress_container = st.container()
-        
+    
         with progress_container:
             st.subheader("Processing Documents")
-            
-            # Store sections in FAISS
+        
+        # Store sections in FAISS directly using uploaded files
             st.text("Storing company sections...")
             company_progress = st.progress(0)
-            company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
-            
+            company_faiss = store_sections_in_faiss(company_file, checklist_df, company_progress)
+        
             st.text("Storing customer sections...")
             customer_progress = st.progress(0)
-            customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
+            customer_faiss = store_sections_in_faiss(customer_file, checklist_df, customer_progress)
+        
+        # Read checklist
+            checklist_df = pd.read_excel(checklist_path)
+        
+        # Create progress container
+            progress_container = st.container()
+        
+            with progress_container:
+                st.subheader("Processing Documents")
+            
+            # Store sections in FAISS
+                st.text("Storing company sections...")
+                company_progress = st.progress(0)
+                company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
+            
+                st.text("Storing customer sections...")
+                customer_progress = st.progress(0)
+                customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
             
             # Process each section
             st.subheader("Comparing Sections")
