@@ -325,13 +325,10 @@ def compare_dataframe(df, groq_api_key, batch_size=50):
     return df
 
 def format_output_prompt(section_differences):
-    """
-    Create a prompt to generate the formatted output based on the section differences.
-    """
     prompt = (
         "I'm analyzing differences between company and customer documents. "
         "For each section with differences, I need you to categorize them into the following format:\n\n"
-        "1. Samples affected - a list of sample IDs or 'All Samples' if the issue affects all samples\n"
+        "1. Samples affected - a list of sample IDs or 'All Samples' which are the Customer document name (without extension like .docx) if the issue affects all samples\n"
         "2. Observation Category - categorize the issue into one of these categories:\n"
         "   - 'Mismatch of content between Filed Copy and customer copy'\n"
         "   - 'Available in Filed Copy but missing in Customer Copy'\n"
@@ -361,14 +358,9 @@ def format_output_prompt(section_differences):
     return prompt
 
 def generate_formatted_output(section_differences, groq_api_key):
-    """
-    Generates the formatted output using LLM based on the section differences.
-    """
-    import json
     
     prompt = format_output_prompt(section_differences)
     
-    # Initialize LLM with the API key
     chatgroq_llm = ChatGroq(
         api_key=groq_api_key,
         model_name="Llama3-8b-8192"
@@ -523,11 +515,9 @@ def main():
             else:
                 df_diff_compared = df_different.copy()
                 
-            # Merge results
             df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
             df_final = df_final.drop(columns=["order"])
             
-            # Group differences by section for the second LLM call
             section_differences = {}
             for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
                 section = row["Section"]
@@ -539,11 +529,9 @@ def main():
                     "Difference": row["Difference"]
                 })
             
-            # Generate formatted output with a second LLM call
             st.text("Generating formatted output...")
             formatted_output = generate_formatted_output(section_differences, groq_api_key)
             
-            # Create structured output DataFrame
             if formatted_output:
                 output_df = pd.DataFrame(formatted_output)
                 output_df.columns = [
@@ -560,13 +548,10 @@ def main():
                     "Sub-category of Observation"
                 ])
             
-            # Clear progress container
             progress_container.empty()
             
-            # Display results
             st.subheader("Comparison Results - Raw Differences")
             
-            # Add filters for the raw differences
             st.sidebar.header("Raw Difference Filters")
             section_filter = st.sidebar.multiselect(
                 "Filter by Section",
@@ -580,13 +565,11 @@ def main():
                 default=df_final["Comparison"].unique()
             )
             
-            # Apply filters
             filtered_df = df_final[
                 df_final["Section"].isin(section_filter) & 
                 df_final["Comparison"].isin(comparison_filter)
             ]
             
-            # Display stats
             col1, col2 = st.columns(2)
             with col1:
                 st.metric("Total Lines", len(df_final))
@@ -595,7 +578,6 @@ def main():
                 st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
                 st.metric("Filtered Results", len(filtered_df))
             
-            # Display the detailed differences table with conditional formatting
             st.dataframe(
                 filtered_df.style.apply(
                     lambda row: ['background-color: #ffcccc' if row['Comparison'] == 'DIFFERENT' else 'background-color: #ccffcc' for _ in row], 
@@ -604,7 +586,6 @@ def main():
                 height=400
             )
             
-            # Display the formatted output
             st.subheader("Formatted Output")
             st.dataframe(
                 output_df.style.apply(
@@ -614,12 +595,10 @@ def main():
                 height=300
             )
             
-            # Export functionality
             st.text("Export Options")
             col1, col2 = st.columns(2)
             
             with col1:
-                # Export raw differences
                 excel_path = os.path.join(temp_dir, "comparison_results.xlsx")
                 filtered_df.to_excel(excel_path, index=False)
                 
@@ -632,7 +611,6 @@ def main():
                     )
             
             with col2:
-                # Export formatted output
                 formatted_path = os.path.join(temp_dir, "formatted_results.xlsx")
                 output_df.to_excel(formatted_path, index=False)
                 
