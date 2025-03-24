@@ -275,7 +275,16 @@ def process_batch(df_batch, groq_api_key):
         return []
     
     try:
-        comparisons = json.loads(response)
+        # Try to clean the response in case there's any text before/after the JSON
+        response_text = response.strip()
+        # Find JSON start and end
+        start_idx = response_text.find('[')
+        end_idx = response_text.rfind(']') + 1
+        if start_idx >= 0 and end_idx > 0:
+            json_text = response_text[start_idx:end_idx]
+            comparisons = json.loads(json_text)
+        else:
+            comparisons = json.loads(response_text)  # Try with the original text
     except Exception as e:
         st.error(f"Error parsing LLM response: {e}")
         st.code(response)
@@ -315,7 +324,17 @@ def compare_dataframe(df, groq_api_key, batch_size=50):
     
     return df
 
-# Main Streamlit app
+# Function to save uploaded file to a temporary location
+def save_uploaded_file(uploaded_file):
+    if uploaded_file is not None:
+        # Create a path in the temporary directory
+        file_path = os.path.join(temp_dir, uploaded_file.name)
+        # Write the file
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        return file_path
+    return None
+
 # Main Streamlit app
 def main():
     st.title("Document Comparison Tool")
@@ -340,42 +359,34 @@ def main():
         if not groq_api_key:
             st.error("Please enter a valid Groq API Key")
             return
-        
-    # Read checklist directly
-        checklist_df = pd.read_excel(checklist_file)
+            
+        # Save uploaded files to temp directory
+        with st.spinner("Saving uploaded files..."):
+            company_path = save_uploaded_file(company_file)
+            customer_path = save_uploaded_file(customer_file)
+            checklist_path = save_uploaded_file(checklist_file)
+            
+            if not all([company_path, customer_path, checklist_path]):
+                st.error("Error saving uploaded files")
+                return
     
-    # Create progress container
+        # Read checklist
+        checklist_df = pd.read_excel(checklist_path)
+    
+        # Create progress container
         progress_container = st.container()
     
         with progress_container:
             st.subheader("Processing Documents")
-        
-        # Store sections in FAISS directly using uploaded files
-            st.text("Storing company sections...")
-            company_progress = st.progress(0)
-            company_faiss = store_sections_in_faiss(company_file, checklist_df, company_progress)
-        
-            st.text("Storing customer sections...")
-            customer_progress = st.progress(0)
-            customer_faiss = store_sections_in_faiss(customer_file, checklist_df, customer_progress)
-        
-        # Read checklist
-            checklist_df = pd.read_excel(checklist_path)
-        
-        # Create progress container
-            progress_container = st.container()
-        
-            with progress_container:
-                st.subheader("Processing Documents")
             
             # Store sections in FAISS
-                st.text("Storing company sections...")
-                company_progress = st.progress(0)
-                company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
+            st.text("Storing company sections...")
+            company_progress = st.progress(0)
+            company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
             
-                st.text("Storing customer sections...")
-                customer_progress = st.progress(0)
-                customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
+            st.text("Storing customer sections...")
+            customer_progress = st.progress(0)
+            customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
             
             # Process each section
             st.subheader("Comparing Sections")
@@ -492,11 +503,10 @@ def main():
             )
             
             # Export functionality
-            output_buffer = pd.ExcelWriter("comparison_results.xlsx", engine="xlsxwriter")
-            filtered_df.to_excel(output_buffer, index=False)
-            output_buffer.close()
+            excel_path = os.path.join(temp_dir, "comparison_results.xlsx")
+            filtered_df.to_excel(excel_path, index=False)
             
-            with open("comparison_results.xlsx", "rb") as f:
+            with open(excel_path, "rb") as f:
                 st.download_button(
                     label="Download Results",
                     data=f,
