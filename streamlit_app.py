@@ -254,7 +254,7 @@ def format_batch_prompt(df_batch):
     )
     return prompt_text
 
-def process_batch(df_batch, groq_api_key):
+def process_batch(df_batch, openai_api_key):
     """
     Processes a batch of rows by creating a prompt, calling the LLM, and parsing the JSON response.
     """
@@ -293,7 +293,7 @@ def process_batch(df_batch, groq_api_key):
         
     return comparisons
 
-def compare_dataframe(df, groq_api_key, batch_size=50):
+def compare_dataframe(df, openai_api_key, batch_size=50):
     """
     Splits the DataFrame into batches, processes only different rows using the LLM,
     and maps the resulting comparison and difference back into the original DataFrame.
@@ -312,7 +312,7 @@ def compare_dataframe(df, groq_api_key, batch_size=50):
     # Split DataFrame into batches
     for i in range(0, len(df), batch_size):
         batch = df.iloc[i:i + batch_size]
-        comparisons = process_batch(batch, groq_api_key)
+        comparisons = process_batch(batch, openai_api_key)
         all_comparisons.extend(comparisons)
         
         # Update progress
@@ -362,7 +362,7 @@ def format_output_prompt(section_differences):
     
     return prompt
 
-def generate_formatted_output(section_differences, groq_api_key):
+def generate_formatted_output(section_differences, openai_api_key):
     
     prompt = format_output_prompt(section_differences)
     
@@ -423,7 +423,7 @@ def main():
     
     if compare_btn:
         if not openai_api_key:
-            st.error("Please enter a valid Groq API Key")
+            st.error("Please enter a valid OpenAI API Key")
             return
             
         # Save uploaded files to temp directory
@@ -516,7 +516,7 @@ def main():
             # Process different rows with LLM
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
-                df_diff_compared = compare_dataframe(df_different, groq_api_key, batch_size=10)
+                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
             else:
                 df_diff_compared = df_different.copy()
                 
@@ -535,7 +535,7 @@ def main():
                 })
             
             st.text("Generating formatted output...")
-            formatted_output = generate_formatted_output(section_differences, groq_api_key)
+            formatted_output = generate_formatted_output(section_differences, openai_api_key)
             
             if formatted_output:
                 output_df = pd.DataFrame(formatted_output)
