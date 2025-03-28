@@ -15,6 +15,7 @@ from langchain.docstore.document import Document as LangchainDocument
 from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 # Set page config
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
@@ -262,13 +263,13 @@ def process_batch(df_batch, groq_api_key):
     prompt = format_batch_prompt(df_batch)
     
     # Initialize LLM with the API key
-    chatgroq_llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="Llama3-8b-8192"
+    openai_llm = ChatOpenAI(
+        api_key=openai_api_key,
+        model_name="gpt-4o-2024-08-06"
     )
     
     with st.spinner("Processing text comparison with LLM..."):
-        response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
+        response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
     
     if not response.strip():
         st.warning("Empty response from LLM.")
@@ -365,13 +366,13 @@ def generate_formatted_output(section_differences, groq_api_key):
     
     prompt = format_output_prompt(section_differences)
     
-    chatgroq_llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="Llama3-8b-8192"
+    openai_llm = ChatOpenAI(
+        api_key=openai_api_key,
+        model_name="gpt-4o-2024-08-06"
     )
     
     with st.spinner("Generating formatted output with LLM..."):
-        response = chatgroq_llm.invoke([{"role": "user", "content": prompt}]).content
+        response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
     
     if not response.strip():
         st.warning("Empty response from format LLM.")
@@ -412,7 +413,7 @@ def main():
         checklist_file = st.file_uploader("Upload Checklist File", type=["xlsx"])
         
         st.header("API Settings")
-        groq_api_key = st.text_input("Enter Groq API Key", type="password", 
+        openai_api_key = st.text_input("Enter OpenAI API Key", type="password", 
                                      value="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")
         
         compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
@@ -421,7 +422,7 @@ def main():
     st.header("Document Comparison Results")
     
     if compare_btn:
-        if not groq_api_key:
+        if not openai_api_key:
             st.error("Please enter a valid Groq API Key")
             return
             
