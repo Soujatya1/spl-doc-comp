@@ -294,9 +294,13 @@ def process_batch(df_batch, groq_api_key):
 
 def compare_dataframe(df, groq_api_key, batch_size=50):
     """
-    Splits the DataFrame into batches, processes each batch using the LLM for detailed comparison,
+    Splits the DataFrame into batches, processes only different rows using the LLM,
     and maps the resulting comparison and difference back into the original DataFrame.
     """
+    # If all rows are similar, return the original DataFrame
+    if df.empty:
+        return df
+    
     all_comparisons = []
     
     total_batches = (len(df) + batch_size - 1) // batch_size
