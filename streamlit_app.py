@@ -355,19 +355,60 @@ def process_batch(df_batch, openai_api_key):
     return comparisons
 
 def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_limit_delay=90):
-    # Add more comprehensive error handling
+    # If all rows are similar or empty, return the original DataFrame
+    if df.empty:
+        return df
+    
+    # Limit to first 300 differences
+    df = df.head(300)
+    
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    
+    # More conservative chunking
+    df_chunks = chunk_dataframe_with_token_reduction(df, max_tokens)
+    
+    all_comparisons = []
     max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Existing implementation with added retry logic
-            return process_comparisons(df, openai_api_key, batch_size, max_tokens, rate_limit_delay)
-        except Exception as e:
-            if attempt < max_retries - 1:
-                st.warning(f"Attempt {attempt + 1} failed. Retrying... Error: {e}")
-                time.sleep(rate_limit_delay)
-            else:
-                st.error(f"Failed after {max_retries} attempts. Error: {e}")
-                return df
+    
+    # Process each chunk with rate limiting and retry logic
+    for chunk_idx, chunk in enumerate(df_chunks):
+        for attempt in range(max_retries):
+            try:
+                # Significant rate limit management
+                if chunk_idx > 0:
+                    st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
+                    time.sleep(rate_limit_delay)
+                
+                # Process the chunk
+                comparisons = process_batch(chunk, openai_api_key)
+                all_comparisons.extend(comparisons)
+                
+                # Update progress
+                progress_bar.progress((chunk_idx + 1) / len(df_chunks))
+                
+                # Break retry loop if successful
+                break
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    st.warning(f"Attempt {attempt + 1} failed for chunk {chunk_idx}. Retrying... Error: {e}")
+                    time.sleep(rate_limit_delay)
+                else:
+                    st.error(f"Failed after {max_retries} attempts for chunk {chunk_idx}. Error: {e}")
+                    # Skip this chunk or handle appropriately
+                    break
+    
+    # Clear the progress bar
+    progress_bar.empty()
+
+    # Merge the comparisons back into the original DataFrame
+    df['Comparison'] = df.index.map(
+        lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
+    df['Difference'] = df.index.map(
+        lambda idx: next((item.get('difference', '') for item in all_comparisons if item['row'] == idx), ""))
+    
+    return df
 
 def format_output_prompt(section_differences):
     prompt = (
