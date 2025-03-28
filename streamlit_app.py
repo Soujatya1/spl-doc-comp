@@ -386,7 +386,7 @@ def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_l
         return df
     
     # Limit to first 300 differences
-    df = df.head(300)
+    df = df.head(100)
     
     # Create a progress bar
     progress_bar = st.progress(0)
