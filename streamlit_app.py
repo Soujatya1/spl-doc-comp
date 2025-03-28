@@ -17,6 +17,7 @@ from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 import tiktoken
+import json
 
 # Set page config
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
