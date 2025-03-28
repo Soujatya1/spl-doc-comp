@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
+import tiktoken
 
 # Set page config
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
@@ -39,6 +40,41 @@ def preprocess_text(text):
     text = re.sub(r"[^\w\s.]", "", text)
     return text
 
+def count_tokens(text, encoding_name="cl100k_base"):
+    """
+    Count tokens in a given text using tiktoken.
+    """
+    encoding = tiktoken.get_encoding(encoding_name)
+    return len(encoding.encode(text))
+
+def chunk_dataframe_by_tokens(df, max_tokens=20000):
+    """
+    Split DataFrame into chunks based on token limit.
+    """
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+    
+    for _, row in df.iterrows():
+        # Estimate tokens for this row
+        row_prompt = f"Row {row.name}:\nCompany: {row['CompanyLine']}\nCustomer: {row['CustomerLine']}"
+        row_tokens = count_tokens(row_prompt)
+        
+        # If adding this row would exceed max tokens, start a new chunk
+        if current_tokens + row_tokens > max_tokens:
+            chunks.append(pd.DataFrame(current_chunk))
+            current_chunk = []
+            current_tokens = 0
+        
+        current_chunk.append(row)
+        current_tokens += row_tokens
+    
+    # Add the last chunk if not empty
+    if current_chunk:
+        chunks.append(pd.DataFrame(current_chunk))
+    
+    return chunks
+    
 def iter_block_items(parent):
     """
     Yield each paragraph and table child in document order.
@@ -256,72 +292,99 @@ def format_batch_prompt(df_batch):
 
 def process_batch(df_batch, openai_api_key):
     """
-    Processes a batch of rows by creating a prompt, calling the LLM, and parsing the JSON response.
+    Modified process_batch to be more robust and token-aware.
     """
-    import json
-    
     prompt = format_batch_prompt(df_batch)
     
-    # Initialize LLM with the API key
+    # Count tokens in the prompt
+    total_tokens = count_tokens(prompt)
+    
+    # Log token count for monitoring
+    st.info(f"Batch Prompt Tokens: {total_tokens}")
+    
+    # Warn if approaching OpenAI's token limits
+    if total_tokens > 20000:
+        st.warning(f"Warning: Prompt is {total_tokens} tokens, which might cause issues.")
+    
+    # Initialize OpenAI LLM with the API key
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
-        model_name="gpt-4o-2024-08-06"
+        model_name="gpt-3.5-turbo-0125",
+        max_tokens=None  # Let OpenAI handle token management
     )
     
     with st.spinner("Processing text comparison with LLM..."):
-        response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
+        try:
+            response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
+        except Exception as e:
+            st.error(f"LLM Processing Error: {e}")
+            return []
     
     if not response.strip():
         st.warning("Empty response from LLM.")
         return []
     
     try:
-        # Try to clean the response in case there's any text before/after the JSON
+        # Clean and parse JSON response
         response_text = response.strip()
-        # Find JSON start and end
         start_idx = response_text.find('[')
         end_idx = response_text.rfind(']') + 1
+        
         if start_idx >= 0 and end_idx > 0:
             json_text = response_text[start_idx:end_idx]
             comparisons = json.loads(json_text)
         else:
-            comparisons = json.loads(response_text)  # Try with the original text
-    except Exception as e:
-        st.error(f"Error parsing LLM response: {e}")
+            comparisons = json.loads(response_text)
+    
+    except json.JSONDecodeError as e:
+        st.error(f"JSON Parsing Error: {e}")
         st.code(response)
         comparisons = []
-        
+    
     return comparisons
 
-def compare_dataframe(df, openai_api_key, batch_size=50):
+def compare_dataframe(df, openai_api_key, batch_size=50, max_tokens=20000, rate_limit_delay=60):
     """
-    Splits the DataFrame into batches, processes only different rows using the LLM,
-    and maps the resulting comparison and difference back into the original DataFrame.
+    Processes differences with token-aware chunking and rate limit management.
     """
-    # If all rows are similar, return the original DataFrame
+    # If all rows are similar or empty, return the original DataFrame
     if df.empty:
         return df
-    df = df.head(100)
-    all_comparisons = []
     
-    total_batches = (len(df) + batch_size - 1) // batch_size
+    # Limit to first 300 differences
+    df = df.head(300)
     
     # Create a progress bar
     progress_bar = st.progress(0)
     
-    # Split DataFrame into batches
-    for i in range(0, len(df), batch_size):
-        batch = df.iloc[i:i + batch_size]
-        comparisons = process_batch(batch, openai_api_key)
-        all_comparisons.extend(comparisons)
+    # Chunk the DataFrame by tokens
+    df_chunks = chunk_dataframe_by_tokens(df, max_tokens)
+    
+    all_comparisons = []
+    
+    # Process each chunk with rate limiting
+    for chunk_idx, chunk in enumerate(df_chunks):
+        try:
+            # Rate limit management
+            if chunk_idx > 0:
+                st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
+                time.sleep(rate_limit_delay)
+            
+            # Process the chunk
+            comparisons = process_batch(chunk, openai_api_key)
+            all_comparisons.extend(comparisons)
+            
+            # Update progress
+            progress_bar.progress((chunk_idx + 1) / len(df_chunks))
         
-        # Update progress
-        progress_bar.progress((i + batch_size) / len(df) if i + batch_size < len(df) else 1.0)
+        except Exception as e:
+            st.error(f"Error processing chunk {chunk_idx}: {e}")
+            # Optional: add error handling or continue processing
     
     # Clear the progress bar
     progress_bar.empty()
 
-    # Merge the comparisons back into the original DataFrame:
+    # Merge the comparisons back into the original DataFrame
     df['Comparison'] = df.index.map(
         lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
     df['Difference'] = df.index.map(
