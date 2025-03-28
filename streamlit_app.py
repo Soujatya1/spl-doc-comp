@@ -335,7 +335,7 @@ def process_batch(df_batch, openai_api_key):
     # Initialize OpenAI LLM with the API key
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
-        model_name="gpt-3.5-turbo-0125",
+        model_name="gpt-3.5-turbo",
         max_tokens=1000  # Limit output tokens
     )
     
@@ -475,7 +475,7 @@ def generate_formatted_output(section_differences, openai_api_key):
     
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
-        model_name="gpt-4o-2024-08-06"
+        model_name="gpt-3.5-turbo"
     )
     
     with st.spinner("Generating formatted output with LLM..."):
