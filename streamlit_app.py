@@ -301,7 +301,7 @@ def compare_dataframe(df, groq_api_key, batch_size=50):
     # If all rows are similar, return the original DataFrame
     if df.empty:
         return df
-    
+    df = df.head(300)
     all_comparisons = []
     
     total_batches = (len(df) + batch_size - 1) // batch_size
