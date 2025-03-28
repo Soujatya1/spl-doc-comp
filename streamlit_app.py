@@ -57,25 +57,19 @@ def truncate_text(text, max_tokens=500):
     tokens = encoding.encode(text)
     return encoding.decode(tokens[:max_tokens])
 
-def chunk_dataframe_with_token_reduction(df, max_tokens=10000):
+def chunk_dataframe_with_token_reduction(df, max_tokens=5000):
     """
-    Split DataFrame into chunks with aggressive token reduction.
+    More conservative token-based chunking.
+    Breaks down large dataframes into smaller, more manageable chunks.
     """
-    def estimate_row_tokens(row):
-        """Estimate tokens for a single row with truncation."""
-        company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
-        customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
-        row_prompt = f"Row {row.name}:\nCompany: {company_text}\nCustomer: {customer_text}"
-        return count_tokens(row_prompt)
-
     chunks = []
     current_chunk = []
     current_tokens = 0
     
     for _, row in df.iterrows():
-        row_tokens = estimate_row_tokens(row)
+        row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
+        row_tokens = count_tokens(row_text)
         
-        # If adding this row would exceed max tokens, start a new chunk
         if current_tokens + row_tokens > max_tokens:
             chunks.append(pd.DataFrame(current_chunk))
             current_chunk = []
@@ -84,7 +78,6 @@ def chunk_dataframe_with_token_reduction(df, max_tokens=10000):
         current_chunk.append(row)
         current_tokens += row_tokens
     
-    # Add the last chunk if not empty
     if current_chunk:
         chunks.append(pd.DataFrame(current_chunk))
     
@@ -306,44 +299,29 @@ def format_batch_prompt(df_batch):
     return prompt_text
 
 def process_batch(df_batch, openai_api_key):
-    """
-    Modified process_batch with aggressive token reduction.
-    """
     def prepare_batch_prompt(batch):
-        """Prepare prompt with truncated text."""
+        """Even more aggressive token reduction."""
         prompt_lines = []
         for idx, row in batch.iterrows():
-            # Truncate company and customer lines
-            company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
-            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
+            # Extreme truncation
+            company_text = truncate_text(str(row['CompanyLine']), max_tokens=100)
+            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=100)
             
-            prompt_lines.append(f"Row {idx}:")
-            prompt_lines.append(f"Company: {company_text}")
-            prompt_lines.append(f"Customer: {customer_text}")
-            prompt_lines.append("---")
+            prompt_lines.append(f"Row {idx}: Company: {company_text}, Customer: {customer_text}")
         
         prompt_text = "\n".join(prompt_lines)
         prompt_text += (
-            "\n\nCompare the above rows line by line. "
-            "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
+            "\n\nBriefly compare these rows. Output JSON: "
+            "[{'row': row_number, 'comparison': 'SAME/DIFFERENT', 'difference': 'brief explanation'}]"
         )
         return prompt_text
 
-    # Prepare prompt with truncated text
-    prompt = prepare_batch_prompt(df_batch)
-    
-    # Count tokens in the prompt
-    total_tokens = count_tokens(prompt)
-    
-    # Log token count for monitoring
-    st.info(f"Batch Prompt Tokens: {total_tokens}")
-    
-    # Initialize OpenAI LLM with the API key
+    # Use a smaller, faster model
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo-0125",
-        max_tokens=1000  # Limit output tokens
+        max_tokens=500,  # Reduce max output tokens
+        temperature=0.1  # Lower temperature for more consistent output
     )
     
     with st.spinner("Processing text comparison with LLM..."):
@@ -376,54 +354,20 @@ def process_batch(df_batch, openai_api_key):
     
     return comparisons
 
-def compare_dataframe(df, openai_api_key, batch_size=20, max_tokens=10000, rate_limit_delay=70):
-    """
-    Processes differences with aggressive token and rate limit management.
-    """
-    # If all rows are similar or empty, return the original DataFrame
-    if df.empty:
-        return df
-    
-    # Limit to first 300 differences
-    df = df.head(300)
-    
-    # Create a progress bar
-    progress_bar = st.progress(0)
-    
-    # Chunk the DataFrame with token reduction
-    df_chunks = chunk_dataframe_with_token_reduction(df, max_tokens)
-    
-    all_comparisons = []
-    
-    # Process each chunk with rate limiting
-    for chunk_idx, chunk in enumerate(df_chunks):
+def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_limit_delay=90):
+    # Add more comprehensive error handling
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            # Significant rate limit management
-            if chunk_idx > 0:
-                st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
-                time.sleep(rate_limit_delay)
-            
-            # Process the chunk
-            comparisons = process_batch(chunk, openai_api_key)
-            all_comparisons.extend(comparisons)
-            
-            # Update progress
-            progress_bar.progress((chunk_idx + 1) / len(df_chunks))
-        
+            # Existing implementation with added retry logic
+            return process_comparisons(df, openai_api_key, batch_size, max_tokens, rate_limit_delay)
         except Exception as e:
-            st.error(f"Error processing chunk {chunk_idx}: {e}")
-            # Optional: add error handling or continue processing
-    
-    # Clear the progress bar
-    progress_bar.empty()
-
-    # Merge the comparisons back into the original DataFrame
-    df['Comparison'] = df.index.map(
-        lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
-    df['Difference'] = df.index.map(
-        lambda idx: next((item.get('difference', '') for item in all_comparisons if item['row'] == idx), ""))
-    
-    return df
+            if attempt < max_retries - 1:
+                st.warning(f"Attempt {attempt + 1} failed. Retrying... Error: {e}")
+                time.sleep(rate_limit_delay)
+            else:
+                st.error(f"Failed after {max_retries} attempts. Error: {e}")
+                return df
 
 def format_output_prompt(section_differences):
     prompt = (
