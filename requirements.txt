@@ -7,3 +7,4 @@ langchain-groq
 openpyxl
 sentence-transformers
 faiss-cpu
+langchain-openai
