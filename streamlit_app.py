@@ -299,34 +299,52 @@ def format_batch_prompt(df_batch):
     return prompt_text
 
 def process_batch(df_batch, openai_api_key):
+    """
+    Modified process_batch with robust prompt generation and error handling.
+    """
     def prepare_batch_prompt(batch):
-        """Even more aggressive token reduction."""
+        """Prepare prompt with truncated text."""
         prompt_lines = []
         for idx, row in batch.iterrows():
-            # Extreme truncation
-            company_text = truncate_text(str(row['CompanyLine']), max_tokens=100)
-            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=100)
+            # Truncate company and customer lines
+            company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
+            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
             
-            prompt_lines.append(f"Row {idx}: Company: {company_text}, Customer: {customer_text}")
+            prompt_lines.append(f"Row {idx}:")
+            prompt_lines.append(f"Company: {company_text}")
+            prompt_lines.append(f"Customer: {customer_text}")
+            prompt_lines.append("---")
         
         prompt_text = "\n".join(prompt_lines)
         prompt_text += (
-            "\n\nBriefly compare these rows. Output JSON: "
-            "[{'row': row_number, 'comparison': 'SAME/DIFFERENT', 'difference': 'brief explanation'}]"
+            "\n\nCompare the above rows line by line. "
+            "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
+            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
         )
         return prompt_text
 
-    # Use a smaller, faster model
+    # Prepare prompt with truncated text
+    prompt = prepare_batch_prompt(df_batch)
+    
+    # Count tokens in the prompt
+    total_tokens = count_tokens(prompt)
+    
+    # Log token count for monitoring
+    st.info(f"Batch Prompt Tokens: {total_tokens}")
+    
+    # Initialize OpenAI LLM with the API key
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo-0125",
-        max_tokens=500,  # Reduce max output tokens
-        temperature=0.1  # Lower temperature for more consistent output
+        max_tokens=1000  # Limit output tokens
     )
     
     with st.spinner("Processing text comparison with LLM..."):
         try:
-            response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
+            # Explicitly pass the prompt as a message
+            response = openai_llm.invoke([
+                {"role": "user", "content": prompt}
+            ]).content
         except Exception as e:
             st.error(f"LLM Processing Error: {e}")
             return []
@@ -336,19 +354,27 @@ def process_batch(df_batch, openai_api_key):
         return []
     
     try:
-        # Clean and parse JSON response
+        # More robust JSON parsing
         response_text = response.strip()
-        start_idx = response_text.find('[')
-        end_idx = response_text.rfind(']') + 1
         
-        if start_idx >= 0 and end_idx > 0:
-            json_text = response_text[start_idx:end_idx]
-            comparisons = json.loads(json_text)
-        else:
+        # Try multiple methods to extract JSON
+        try:
+            # Direct parsing
             comparisons = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Extract JSON between first [ and last ]
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+                comparisons = json.loads(json_text)
+            else:
+                # Fallback to ast parsing
+                import ast
+                comparisons = ast.literal_eval(response_text)
     
-    except json.JSONDecodeError as e:
-        st.error(f"JSON Parsing Error: {e}")
+    except Exception as e:
+        st.error(f"Comprehensive JSON Parsing Error: {e}")
         st.code(response)
         comparisons = []
     
