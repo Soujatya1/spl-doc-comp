@@ -48,18 +48,31 @@ def count_tokens(text, encoding_name="cl100k_base"):
     encoding = tiktoken.get_encoding(encoding_name)
     return len(encoding.encode(text))
 
-def chunk_dataframe_by_tokens(df, max_tokens=20000):
+def truncate_text(text, max_tokens=500):
     """
-    Split DataFrame into chunks based on token limit.
+    Truncate text to a specific token count.
     """
+    encoding = tiktoken.get_encoding("cl100k_base")
+    tokens = encoding.encode(text)
+    return encoding.decode(tokens[:max_tokens])
+
+def chunk_dataframe_with_token_reduction(df, max_tokens=10000):
+    """
+    Split DataFrame into chunks with aggressive token reduction.
+    """
+    def estimate_row_tokens(row):
+        """Estimate tokens for a single row with truncation."""
+        company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
+        customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
+        row_prompt = f"Row {row.name}:\nCompany: {company_text}\nCustomer: {customer_text}"
+        return count_tokens(row_prompt)
+
     chunks = []
     current_chunk = []
     current_tokens = 0
     
     for _, row in df.iterrows():
-        # Estimate tokens for this row
-        row_prompt = f"Row {row.name}:\nCompany: {row['CompanyLine']}\nCustomer: {row['CustomerLine']}"
-        row_tokens = count_tokens(row_prompt)
+        row_tokens = estimate_row_tokens(row)
         
         # If adding this row would exceed max tokens, start a new chunk
         if current_tokens + row_tokens > max_tokens:
@@ -293,9 +306,31 @@ def format_batch_prompt(df_batch):
 
 def process_batch(df_batch, openai_api_key):
     """
-    Modified process_batch to be more robust and token-aware.
+    Modified process_batch with aggressive token reduction.
     """
-    prompt = format_batch_prompt(df_batch)
+    def prepare_batch_prompt(batch):
+        """Prepare prompt with truncated text."""
+        prompt_lines = []
+        for idx, row in batch.iterrows():
+            # Truncate company and customer lines
+            company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
+            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
+            
+            prompt_lines.append(f"Row {idx}:")
+            prompt_lines.append(f"Company: {company_text}")
+            prompt_lines.append(f"Customer: {customer_text}")
+            prompt_lines.append("---")
+        
+        prompt_text = "\n".join(prompt_lines)
+        prompt_text += (
+            "\n\nCompare the above rows line by line. "
+            "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
+            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
+        )
+        return prompt_text
+
+    # Prepare prompt with truncated text
+    prompt = prepare_batch_prompt(df_batch)
     
     # Count tokens in the prompt
     total_tokens = count_tokens(prompt)
@@ -303,15 +338,11 @@ def process_batch(df_batch, openai_api_key):
     # Log token count for monitoring
     st.info(f"Batch Prompt Tokens: {total_tokens}")
     
-    # Warn if approaching OpenAI's token limits
-    if total_tokens > 20000:
-        st.warning(f"Warning: Prompt is {total_tokens} tokens, which might cause issues.")
-    
     # Initialize OpenAI LLM with the API key
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo-0125",
-        max_tokens=None  # Let OpenAI handle token management
+        max_tokens=1000  # Limit output tokens
     )
     
     with st.spinner("Processing text comparison with LLM..."):
@@ -344,9 +375,9 @@ def process_batch(df_batch, openai_api_key):
     
     return comparisons
 
-def compare_dataframe(df, openai_api_key, batch_size=50, max_tokens=20000, rate_limit_delay=60):
+def compare_dataframe(df, openai_api_key, batch_size=20, max_tokens=10000, rate_limit_delay=70):
     """
-    Processes differences with token-aware chunking and rate limit management.
+    Processes differences with aggressive token and rate limit management.
     """
     # If all rows are similar or empty, return the original DataFrame
     if df.empty:
@@ -358,15 +389,15 @@ def compare_dataframe(df, openai_api_key, batch_size=50, max_tokens=20000, rate_
     # Create a progress bar
     progress_bar = st.progress(0)
     
-    # Chunk the DataFrame by tokens
-    df_chunks = chunk_dataframe_by_tokens(df, max_tokens)
+    # Chunk the DataFrame with token reduction
+    df_chunks = chunk_dataframe_with_token_reduction(df, max_tokens)
     
     all_comparisons = []
     
     # Process each chunk with rate limiting
     for chunk_idx, chunk in enumerate(df_chunks):
         try:
-            # Rate limit management
+            # Significant rate limit management
             if chunk_idx > 0:
                 st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
                 time.sleep(rate_limit_delay)
