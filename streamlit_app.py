@@ -20,22 +20,19 @@ from langchain_openai import ChatOpenAI
 import tiktoken
 import json
 
-# Set page config
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
-# Create temp directory for storing files
 @st.cache_resource
 def get_temp_dir():
     return tempfile.mkdtemp()
 
 temp_dir = get_temp_dir()
 
-# Helper functions
 def preprocess_text(text):
     """Cleans text: removes text in < > brackets, extra spaces, normalizes, lowercases, and removes punctuation (except periods)."""
     if not text:
         return ""
-    text = re.sub(r"<.*?>", "", text)  # Remove placeholders/dynamic content
+    text = re.sub(r"<.*?>", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     text = unicodedata.normalize("NFKD", text)
     text = text.lower()
@@ -43,25 +40,15 @@ def preprocess_text(text):
     return text
 
 def count_tokens(text, encoding_name="cl100k_base"):
-    """
-    Count tokens in a given text using tiktoken.
-    """
     encoding = tiktoken.get_encoding(encoding_name)
     return len(encoding.encode(text))
 
 def truncate_text(text, max_tokens=500):
-    """
-    Truncate text to a specific token count.
-    """
     encoding = tiktoken.get_encoding("cl100k_base")
     tokens = encoding.encode(text)
     return encoding.decode(tokens[:max_tokens])
 
 def chunk_dataframe_with_token_reduction(df, max_tokens=5000):
-    """
-    More conservative token-based chunking.
-    Breaks down large dataframes into smaller, more manageable chunks.
-    """
     chunks = []
     current_chunk = []
     current_tokens = 0
@@ -84,9 +71,6 @@ def chunk_dataframe_with_token_reduction(df, max_tokens=5000):
     return chunks
     
 def iter_block_items(parent):
-    """
-    Yield each paragraph and table child in document order.
-    """
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     else:
@@ -98,11 +82,6 @@ def iter_block_items(parent):
             yield Table(child, parent)
 
 def extract_text_by_sections(docx_path):
-    """
-    Extracts paragraphs and tables from a DOCX file while maintaining document order.
-    Returns a list of dictionaries with keys: section, text, type, and order.
-    When a heading (style containing "heading") is encountered, the current section is updated.
-    """
     extracted_data = []
     doc = Document(docx_path)
     current_section = "unknown_section"
@@ -152,7 +131,6 @@ def find_closest_match(target, text_list, threshold=0.65):
     return best_match
 
 def extract_section(extracted_data, start_marker, end_marker):
-    """Sorts extracted data by order, combines text, splits into lines, then extracts substring between best matching markers."""
     if not extracted_data:
         return ""
     sorted_data = sorted(extracted_data, key=lambda d: d.get("order", 0))
@@ -174,10 +152,6 @@ def extract_section(extracted_data, start_marker, end_marker):
         return combined_text
 
 def store_sections_in_faiss(docx_path, checklist_df, progress_bar=None):
-    """
-    Reads the DOCX file, extracts sections based on the checklist (PageName, StartMarker, EndMarker),
-    creates Document objects with metadata, and stores them in a FAISS vector store.
-    """
     extracted_data = extract_text_by_sections(docx_path)
     sections = []
     
@@ -202,31 +176,22 @@ def store_sections_in_faiss(docx_path, checklist_df, progress_bar=None):
             
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     faiss_index = FAISS.from_documents(sections, embedding_model)
-    # Attach documents for later retrieval
     faiss_index.documents = sections
     return faiss_index
 
 def split_text_into_lines(text):
-    """Splits text into lines by newline or pipe symbol."""
     return re.split(r'\n|\||\. ', text)
 
 def find_best_line_match(target, lines):
-    """
-    Finds the closest matching line from a list of lines for a given target string.
-    Uses a dynamic threshold based on the target length and RapidFuzz for faster computation.
-    Returns the best matching line if similarity is above threshold, otherwise an empty string.
-    """
     target = target.lower().strip()
 
-    # Determine dynamic threshold based on target length.
     if len(target) < 10:
-        custom_threshold = 90  # RapidFuzz functions typically use percentages (0-100)
+        custom_threshold = 90
     elif len(target) < 50:
         custom_threshold = 75
     else:
         custom_threshold = 65
 
-    # Use RapidFuzz's process.extractOne to get the best match.
     best = process.extractOne(
         query=target,
         choices=lines,
@@ -234,17 +199,12 @@ def find_best_line_match(target, lines):
         score_cutoff=custom_threshold
     )
     if best:
-        # best is a tuple: (best_match, score, index)
         return best[0]
     else:
         return ""
 
 def extract_content_within_markers(text, start_marker, end_marker):
-    """
-    Splits the text into lines and uses fuzzy matching to find the best
-    matching start and end markers. Then returns the substring (with both markers included).
-    If either marker is not found, returns the full text.
-    """
+
     lines = text.split("\n")
     best_start = find_closest_match(start_marker, lines)
     best_end = find_closest_match(end_marker, lines)
@@ -255,7 +215,7 @@ def extract_content_within_markers(text, start_marker, end_marker):
         start_idx = lines.index(best_start)
         end_idx = lines.index(best_end)
         if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx  # Swap if necessary
+            start_idx, end_idx = end_idx, start_idx
         return "\n".join(lines[start_idx:end_idx + 1])
     except ValueError:
         st.warning("Error finding marker indices; returning full text.")
@@ -266,7 +226,6 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
     Retrieves all documents from the FAISS index whose metadata contains the specified criteria.
     """
     matching_sections = []
-    # Iterate through all stored documents in the FAISS index
     for doc in faiss_index.documents:
         metadata = doc.metadata
         if (page_name.lower() in metadata.get("section", "").lower() and
@@ -280,10 +239,7 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
     return matching_sections
 
 def format_batch_prompt(df_batch):
-    """
-    Converts a batch of DataFrame rows into a prompt string.
-    Each row is formatted with its row number, company line, and customer line.
-    """
+    
     prompt_lines = []
     for idx, row in df_batch.iterrows():
         prompt_lines.append(f"Row {idx}:")
@@ -306,7 +262,6 @@ def process_batch(df_batch, openai_api_key):
         """Prepare prompt with truncated text."""
         prompt_lines = []
         for idx, row in batch.iterrows():
-            # Truncate company and customer lines
             company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
             customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
             
@@ -323,25 +278,20 @@ def process_batch(df_batch, openai_api_key):
         )
         return prompt_text
 
-    # Prepare prompt with truncated text
     prompt = prepare_batch_prompt(df_batch)
     
-    # Count tokens in the prompt
     total_tokens = count_tokens(prompt)
     
-    # Log token count for monitoring
     st.info(f"Batch Prompt Tokens: {total_tokens}")
     
-    # Initialize OpenAI LLM with the API key
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo",
-        max_tokens=1000  # Limit output tokens
+        max_tokens=1000
     )
     
     with st.spinner("Processing text comparison with LLM..."):
         try:
-            # Explicitly pass the prompt as a message
             response = openai_llm.invoke([
                 {"role": "user", "content": prompt}
             ]).content
@@ -354,22 +304,17 @@ def process_batch(df_batch, openai_api_key):
         return []
     
     try:
-        # More robust JSON parsing
         response_text = response.strip()
         
-        # Try multiple methods to extract JSON
         try:
-            # Direct parsing
             comparisons = json.loads(response_text)
         except json.JSONDecodeError:
-            # Extract JSON between first [ and last ]
             import re
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 json_text = json_match.group(0)
                 comparisons = json.loads(json_text)
             else:
-                # Fallback to ast parsing
                 import ast
                 comparisons = ast.literal_eval(response_text)
     
@@ -381,39 +326,30 @@ def process_batch(df_batch, openai_api_key):
     return comparisons
 
 def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_limit_delay=90):
-    # If all rows are similar or empty, return the original DataFrame
     if df.empty:
         return df
     
-    # Limit to first 300 differences
     df = df.head(100)
     
-    # Create a progress bar
     progress_bar = st.progress(0)
     
-    # More conservative chunking
     df_chunks = chunk_dataframe_with_token_reduction(df, max_tokens)
     
     all_comparisons = []
     max_retries = 3
     
-    # Process each chunk with rate limiting and retry logic
     for chunk_idx, chunk in enumerate(df_chunks):
         for attempt in range(max_retries):
             try:
-                # Significant rate limit management
                 if chunk_idx > 0:
                     st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
                     time.sleep(rate_limit_delay)
                 
-                # Process the chunk
                 comparisons = process_batch(chunk, openai_api_key)
                 all_comparisons.extend(comparisons)
                 
-                # Update progress
                 progress_bar.progress((chunk_idx + 1) / len(df_chunks))
                 
-                # Break retry loop if successful
                 break
             
             except Exception as e:
@@ -422,13 +358,10 @@ def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_l
                     time.sleep(rate_limit_delay)
                 else:
                     st.error(f"Failed after {max_retries} attempts for chunk {chunk_idx}. Error: {e}")
-                    # Skip this chunk or handle appropriately
                     break
     
-    # Clear the progress bar
     progress_bar.empty()
 
-    # Merge the comparisons back into the original DataFrame
     df['Comparison'] = df.index.map(
         lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
     df['Difference'] = df.index.map(
@@ -509,7 +442,6 @@ def save_uploaded_file(uploaded_file):
         return file_path
     return None
 
-# Main Streamlit app
 def main():
     st.title("Document Comparison Tool")
     
@@ -521,11 +453,10 @@ def main():
         
         st.header("API Settings")
         openai_api_key = st.text_input("Enter OpenAI API Key", type="password", 
-                                     value="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")
+                                     value="")
         
         compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
     
-    # Main content
     st.header("Document Comparison Results")
     
     if compare_btn:
@@ -533,7 +464,6 @@ def main():
             st.error("Please enter a valid OpenAI API Key")
             return
             
-        # Save uploaded files to temp directory
         with st.spinner("Saving uploaded files..."):
             company_path = save_uploaded_file(company_file)
             customer_path = save_uploaded_file(customer_file)
@@ -543,16 +473,13 @@ def main():
                 st.error("Error saving uploaded files")
                 return
     
-        # Read checklist
         checklist_df = pd.read_excel(checklist_path)
     
-        # Create progress container
         progress_container = st.container()
     
         with progress_container:
             st.subheader("Processing Documents")
             
-            # Store sections in FAISS
             st.text("Storing company sections...")
             company_progress = st.progress(0)
             company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
@@ -561,7 +488,6 @@ def main():
             customer_progress = st.progress(0)
             customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
             
-            # Process each section
             st.subheader("Comparing Sections")
             final_rows = []
             
@@ -592,7 +518,6 @@ def main():
                         "CustomerLine": best_cust_line
                     })
             
-            # Create DataFrame and perform initial filtering
             df = pd.DataFrame(final_rows).drop_duplicates()
             df["order"] = df.index
             
@@ -620,7 +545,6 @@ def main():
             
             st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
             
-            # Process different rows with LLM
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
                 df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
