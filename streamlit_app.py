@@ -827,28 +827,30 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                excel_path = os.path.join(temp_dir, "comparison_results.xlsx")
-                filtered_df.to_excel(excel_path, index=False)
-                
-                with open(excel_path, "rb") as f:
-                    st.download_button(
-                        label="Download Raw Results",
-                        data=f,
-                        file_name="document_comparison_raw.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-            
+                excel_buffer = io.BytesIO()
+                filtered_df.to_excel(excel_buffer, index=False)
+                excel_buffer.seek(0)
+    
+                st.download_button(
+                    label="Download Raw Results",
+                    data=excel_buffer,
+                    file_name="document_comparison_raw.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="raw_download"  # Add a unique key
+                )
+
             with col2:
-                formatted_path = os.path.join(temp_dir, "formatted_results.xlsx")
-                output_df.to_excel(formatted_path, index=False)
-                
-                with open(formatted_path, "rb") as f:
-                    st.download_button(
-                        label="Download Formatted Results",
-                        data=f,
-                        file_name="document_comparison_formatted.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                formatted_buffer = io.BytesIO()
+                output_df.to_excel(formatted_buffer, index=False)
+                formatted_buffer.seek(0)
+    
+                st.download_button(
+                    label="Download Formatted Results",
+                    data=formatted_buffer,
+                    file_name="document_comparison_formatted.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="formatted_download"  # Add a unique key
+                )
 
 if __name__ == "__main__":
     main()
