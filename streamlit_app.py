@@ -256,14 +256,15 @@ def format_batch_prompt(df_batch):
 
 def process_batch(df_batch, openai_api_key):
     """
-    Modified process_batch with robust prompt generation and error handling.
+    Process a batch of rows with improved prompt construction and error handling.
     """
     def prepare_batch_prompt(batch):
-        """Prepare prompt with truncated text."""
+        """Prepare prompt with truncated text for better token efficiency."""
         prompt_lines = []
         for idx, row in batch.iterrows():
-            company_text = truncate_text(str(row['CompanyLine']), max_tokens=200)
-            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=200)
+            # More aggressive truncation to save tokens
+            company_text = truncate_text(str(row['CompanyLine']), max_tokens=150)
+            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=150)
             
             prompt_lines.append(f"Row {idx}:")
             prompt_lines.append(f"Company: {company_text}")
@@ -274,13 +275,22 @@ def process_batch(df_batch, openai_api_key):
         prompt_text += (
             "\n\nCompare the above rows line by line. "
             "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
+            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Return ONLY the JSON."
         )
         return prompt_text
 
     prompt = prepare_batch_prompt(df_batch)
     
     total_tokens = count_tokens(prompt)
+    
+    # Check if the prompt is too large
+    if total_tokens > 4000:
+        st.warning(f"Prompt too large ({total_tokens} tokens). Further chunking required.")
+        # Recursively process smaller chunks
+        half_size = len(df_batch) // 2
+        first_half = process_batch(df_batch.iloc[:half_size], openai_api_key)
+        second_half = process_batch(df_batch.iloc[half_size:], openai_api_key)
+        return first_half + second_half
     
     st.info(f"Batch Prompt Tokens: {total_tokens}")
     
@@ -325,43 +335,65 @@ def process_batch(df_batch, openai_api_key):
     
     return comparisons
 
-def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=2000, rate_limit_delay=90):
+def chunk_dataframe_into_batches(df, batch_size=50):
+    """
+    Split a dataframe into chunks of specified batch size.
+    Returns a list of dataframe chunks.
+    """
+    return [df.iloc[i:i+batch_size] for i in range(0, len(df), batch_size)]
+
+def compare_dataframe(df, openai_api_key, batch_size=50, rate_limit_delay=20):
     if df.empty:
         return df
     
+    # Limit to 100 rows for testing/demo (optional - remove this if you want to process all rows)
     df = df.head(100)
     
     progress_bar = st.progress(0)
     
-    df_chunks = chunk_dataframe_with_token_reduction(df, max_tokens)
+    # Split the dataframe into fixed-size batches of 50 rows
+    df_batches = chunk_dataframe_into_batches(df, batch_size=batch_size)
     
     all_comparisons = []
     max_retries = 3
     
-    for chunk_idx, chunk in enumerate(df_chunks):
+    for batch_idx, batch in enumerate(df_batches):
+        st.text(f"Processing batch {batch_idx+1} of {len(df_batches)} ({len(batch)} rows)")
+        
         for attempt in range(max_retries):
             try:
-                if chunk_idx > 0:
+                if batch_idx > 0:
                     st.info(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
                     time.sleep(rate_limit_delay)
                 
-                comparisons = process_batch(chunk, openai_api_key)
-                all_comparisons.extend(comparisons)
+                # Further chunk each batch if needed based on token count
+                token_chunks = chunk_dataframe_with_token_reduction(batch, max_tokens=3000)
                 
-                progress_bar.progress((chunk_idx + 1) / len(df_chunks))
+                batch_comparisons = []
+                for token_chunk_idx, token_chunk in enumerate(token_chunks):
+                    st.text(f"Processing token chunk {token_chunk_idx+1} of {len(token_chunks)}")
+                    chunk_comparisons = process_batch(token_chunk, openai_api_key)
+                    batch_comparisons.extend(chunk_comparisons)
+                    
+                    # Add a small delay between token chunks if there are multiple
+                    if len(token_chunks) > 1 and token_chunk_idx < len(token_chunks) - 1:
+                        time.sleep(5)
                 
+                all_comparisons.extend(batch_comparisons)
+                progress_bar.progress((batch_idx + 1) / len(df_batches))
                 break
             
             except Exception as e:
                 if attempt < max_retries - 1:
-                    st.warning(f"Attempt {attempt + 1} failed for chunk {chunk_idx}. Retrying... Error: {e}")
+                    st.warning(f"Attempt {attempt + 1} failed for batch {batch_idx}. Retrying... Error: {e}")
                     time.sleep(rate_limit_delay)
                 else:
-                    st.error(f"Failed after {max_retries} attempts for chunk {chunk_idx}. Error: {e}")
+                    st.error(f"Failed after {max_retries} attempts for batch {batch_idx}. Error: {e}")
                     break
     
     progress_bar.empty()
 
+    # Map the comparison results back to the dataframe
     df['Comparison'] = df.index.map(
         lambda idx: next((item['comparison'] for item in all_comparisons if item['row'] == idx), "N/A"))
     df['Difference'] = df.index.map(
@@ -370,6 +402,17 @@ def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=2000, rate_l
     return df
 
 def format_output_prompt(section_differences):
+    """
+    Create a prompt for the second LLM call to format the differences into the required structure.
+    Includes chunking for large datasets.
+    """
+    # Count total number of differences to determine if chunking is needed
+    total_differences = sum(len(diffs) for diffs in section_differences.values())
+    
+    if total_differences > 30:  # Arbitrary threshold, adjust based on testing
+        st.warning(f"Large number of differences ({total_differences}). Processing in chunks.")
+        return chunk_section_differences(section_differences)
+    
     prompt = (
         "I'm analyzing differences between company and customer documents. "
         "For each section with differences, I need you to categorize them into the following format:\n\n"
@@ -387,8 +430,8 @@ def format_output_prompt(section_differences):
         prompt += f"Section: {section}\n"
         prompt += "Differences:\n"
         for diff in differences:
-            prompt += f"- Company: {diff['CompanyLine']}\n"
-            prompt += f"- Customer: {diff['CustomerLine']}\n"
+            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 100)}\n"
+            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 100)}\n"
             prompt += f"- Difference: {diff['Difference']}\n\n"
     
     prompt += (
@@ -402,10 +445,60 @@ def format_output_prompt(section_differences):
     
     return prompt
 
+def chunk_section_differences(section_differences):
+    """
+    Split large section differences into multiple prompts.
+    Returns a list of prompts.
+    """
+    prompts = []
+    current_sections = {}
+    current_diff_count = 0
+    max_diff_per_prompt = 20  # Adjust based on testing
+    
+    for section, differences in section_differences.items():
+        if current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
+            # Create a prompt from current accumulated sections
+            prompts.append(format_output_prompt(current_sections))
+            current_sections = {}
+            current_diff_count = 0
+        
+        current_sections[section] = differences
+        current_diff_count += len(differences)
+    
+    # Add any remaining sections
+    if current_diff_count > 0:
+        prompts.append(format_output_prompt(current_sections))
+    
+    return prompts
+
 def generate_formatted_output(section_differences, openai_api_key):
+    """
+    Generate formatted output from section differences, handling chunking if needed.
+    """
+    prompt_or_prompts = format_output_prompt(section_differences)
     
-    prompt = format_output_prompt(section_differences)
-    
+    # Check if we got multiple prompts (chunked) or a single prompt
+    if isinstance(prompt_or_prompts, list):
+        all_formatted_outputs = []
+        
+        for i, prompt in enumerate(prompt_or_prompts):
+            st.text(f"Processing format chunk {i+1} of {len(prompt_or_prompts)}")
+            chunk_output = process_format_prompt(prompt, openai_api_key)
+            all_formatted_outputs.extend(chunk_output)
+            
+            # Add delay between chunks
+            if i < len(prompt_or_prompts) - 1:
+                time.sleep(10)
+        
+        return all_formatted_outputs
+    else:
+        # Single prompt
+        return process_format_prompt(prompt_or_prompts, openai_api_key)
+
+def process_format_prompt(prompt, openai_api_key):
+    """
+    Process a single formatting prompt.
+    """
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo"
