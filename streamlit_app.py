@@ -739,7 +739,7 @@ def main():
             
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
-                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
+                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=20)
             else:
                 df_diff_compared = df_different.copy()
                 
