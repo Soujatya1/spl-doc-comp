@@ -43,7 +43,7 @@ def count_tokens(text, encoding_name="cl100k_base"):
     encoding = tiktoken.get_encoding(encoding_name)
     return len(encoding.encode(text))
 
-def truncate_text(text, max_tokens=500):
+def truncate_text(text, max_tokens=100):
     encoding = tiktoken.get_encoding("cl100k_base")
     tokens = encoding.encode(text)
     return encoding.decode(tokens[:max_tokens])
@@ -325,7 +325,7 @@ def process_batch(df_batch, openai_api_key):
     
     return comparisons
 
-def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=5000, rate_limit_delay=90):
+def compare_dataframe(df, openai_api_key, batch_size=10, max_tokens=2000, rate_limit_delay=90):
     if df.empty:
         return df
     
