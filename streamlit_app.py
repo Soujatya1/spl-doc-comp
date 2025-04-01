@@ -257,43 +257,52 @@ def format_batch_prompt(df_batch):
 def process_batch(df_batch, openai_api_key):
     """
     Process a batch of rows with improved prompt construction and error handling.
+    Non-recursive implementation.
     """
-    def prepare_batch_prompt(batch):
-        """Prepare prompt with truncated text for better token efficiency."""
-        prompt_lines = []
-        for idx, row in batch.iterrows():
-            # More aggressive truncation to save tokens
-            company_text = truncate_text(str(row['CompanyLine']), max_tokens=150)
-            customer_text = truncate_text(str(row['CustomerLine']), max_tokens=150)
-            
-            prompt_lines.append(f"Row {idx}:")
-            prompt_lines.append(f"Company: {company_text}")
-            prompt_lines.append(f"Customer: {customer_text}")
-            prompt_lines.append("---")
+    # Prepare the prompt with fixed truncation
+    prompt_lines = []
+    for idx, row in df_batch.iterrows():
+        # Aggressive truncation to save tokens
+        company_text = truncate_text(str(row['CompanyLine']), max_tokens=100)
+        customer_text = truncate_text(str(row['CustomerLine']), max_tokens=100)
         
-        prompt_text = "\n".join(prompt_lines)
-        prompt_text += (
-            "\n\nCompare the above rows line by line. "
-            "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-            "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Return ONLY the JSON."
-        )
-        return prompt_text
-
-    prompt = prepare_batch_prompt(df_batch)
+        prompt_lines.append(f"Row {idx}:")
+        prompt_lines.append(f"Company: {company_text}")
+        prompt_lines.append(f"Customer: {customer_text}")
+        prompt_lines.append("---")
     
-    total_tokens = count_tokens(prompt)
+    prompt_text = "\n".join(prompt_lines)
+    prompt_text += (
+        "\n\nCompare the above rows line by line. "
+        "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
+        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Return ONLY the JSON."
+    )
     
-    # Check if the prompt is too large
-    if total_tokens > 4000:
-        st.warning(f"Prompt too large ({total_tokens} tokens). Further chunking required.")
-        # Recursively process smaller chunks
-        half_size = len(df_batch) // 2
-        first_half = process_batch(df_batch.iloc[:half_size], openai_api_key)
-        second_half = process_batch(df_batch.iloc[half_size:], openai_api_key)
-        return first_half + second_half
-    
+    total_tokens = count_tokens(prompt_text)
     st.info(f"Batch Prompt Tokens: {total_tokens}")
     
+    # If the prompt is still too large, we need to further split the batch
+    if total_tokens > 4000:
+        st.warning(f"Prompt too large ({total_tokens} tokens). Splitting batch.")
+        
+        # Instead of recursion, split the batch in half and process each separately
+        half_size = len(df_batch) // 2
+        if half_size == 0:  # Can't split further
+            st.error("Cannot split batch further. Individual rows may be too large.")
+            # Try with extreme truncation for this batch
+            for idx, row in df_batch.iterrows():
+                df_batch.at[idx, 'CompanyLine'] = truncate_text(str(row['CompanyLine']), max_tokens=50)
+                df_batch.at[idx, 'CustomerLine'] = truncate_text(str(row['CustomerLine']), max_tokens=50)
+            return process_batch(df_batch, openai_api_key)
+        
+        # Process each half separately
+        first_half_results = process_batch(df_batch.iloc[:half_size], openai_api_key)
+        second_half_results = process_batch(df_batch.iloc[half_size:], openai_api_key)
+        
+        # Combine results
+        return first_half_results + second_half_results
+    
+    # If we're here, the prompt is within token limits
     openai_llm = ChatOpenAI(
         api_key=openai_api_key,
         model_name="gpt-3.5-turbo",
@@ -303,7 +312,7 @@ def process_batch(df_batch, openai_api_key):
     with st.spinner("Processing text comparison with LLM..."):
         try:
             response = openai_llm.invoke([
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt_text}
             ]).content
         except Exception as e:
             st.error(f"LLM Processing Error: {e}")
@@ -326,7 +335,11 @@ def process_batch(df_batch, openai_api_key):
                 comparisons = json.loads(json_text)
             else:
                 import ast
-                comparisons = ast.literal_eval(response_text)
+                try:
+                    comparisons = ast.literal_eval(response_text)
+                except:
+                    st.error("Could not parse response as JSON or Python literal")
+                    comparisons = []
     
     except Exception as e:
         st.error(f"Comprehensive JSON Parsing Error: {e}")
