@@ -689,7 +689,11 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
             st.success("✅ Formatted output generated successfully")
 
         progress_container.empty()
-        return True
+        if True:
+            st.session_state.comparison_completed = True
+            # Force rerun to show results
+            st.experimental_rerun()
+            return True
         
     except Exception as e:
         progress_container.error(f"Error occurred during processing: {e}")
@@ -701,6 +705,16 @@ def display_results():
     """Display the comparison results"""
     st.header("Document Comparison Results")
     
+    if st.session_state.comparison_completed:
+        display_results()
+        # Add a button to start a new comparison
+        if st.button("Start New Comparison"):
+            st.session_state.comparison_completed = False
+            st.session_state.final_df = None
+            st.session_state.output_df = None
+            st.experimental_rerun()
+        return
+        
     if st.session_state.final_df is not None:
         # Display metrics
         df_final = st.session_state.final_df
