@@ -689,11 +689,8 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
             st.success("✅ Formatted output generated successfully")
 
         progress_container.empty()
-        if True:
-            st.session_state.comparison_completed = True
-            # Force rerun to show results
-            st.experimental_rerun()
-            return True
+        st.session_state.comparison_completed = True
+        return True
         
     except Exception as e:
         progress_container.error(f"Error occurred during processing: {e}")
@@ -706,12 +703,15 @@ def display_results():
     st.header("Document Comparison Results")
     
     if st.session_state.comparison_completed:
-        display_results()
         # Add a button to start a new comparison
         if st.button("Start New Comparison"):
             st.session_state.comparison_completed = False
             st.session_state.final_df = None
             st.session_state.output_df = None
+            # Clear cached functions
+            store_sections_in_faiss.clear()
+            compare_dataframe.clear()
+            generate_formatted_output.clear()
             st.experimental_rerun()
         return
         
@@ -745,10 +745,14 @@ def display_results():
                 st.dataframe(st.session_state.output_df, use_container_width=True)
                 
                 # Add download button for Excel export
-                output_excel = st.session_state.output_df.to_excel(index=False)
+                from io import BytesIO
+                buffer = BytesIO()
+                st.session_state.output_df.to_excel(buffer, index=False)
+                buffer.seek(0)
+                
                 st.download_button(
                     label="Download Formatted Report",
-                    data=output_excel,
+                    data=buffer,  # Use the buffer object
                     file_name="document_comparison_report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
