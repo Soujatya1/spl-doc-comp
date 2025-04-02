@@ -434,9 +434,9 @@ def create_single_format_prompt(section_differences):
         "   - 'Terms and Conditions'\n"
         "   - 'Ombudsman Page'\n"
         "   - 'Annexure 1'\n"
-        "   - 'Sections'\n"
-        "4. Sub-category of Observation - a concise description that summarizes all the differences for this page\n\n"
-        "IMPORTANT: Summarize all differences for the same page into at most TWO rows in your response. "
+        "   - 'Annexure AA'\n"
+        "4. Sub-category of Observation - a concise description that summarizes all the differences for this page intelligently understanding what the differences are about\n\n"
+        "IMPORTANT: Summarize all the page-wise differences into at most TWO rows in your response. "
         "Group similar differences together and provide a consolidated summary rather than listing each individual difference. Please collate all the information correctly and align as per\n\n"
         "Here are the differences found per section:\n\n"
     )
