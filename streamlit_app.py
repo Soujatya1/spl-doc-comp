@@ -145,7 +145,13 @@ def extract_section(extracted_data, start_marker, end_marker):
 @st.cache_data
 def store_sections_in_faiss(docx_path, checklist_df):
     """Store document sections in FAISS with caching"""
-    os.makedirs("model_cache", exist_ok=True)
+    try:
+        from langchain_community.embeddings import TensorflowHubEmbeddings
+        embedding_model = TensorflowHubEmbeddings(
+            model_url="https://tfhub.dev/google/universal-sentence-encoder/4"
+        )
+    except ImportError:
+        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
     
     progress_bar = st.progress(0)
     extracted_data = extract_text_by_sections(docx_path)
@@ -169,7 +175,7 @@ def store_sections_in_faiss(docx_path, checklist_df):
             doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
             sections.append(doc_obj)
     
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2", cache_folder="./model_cache" )
+    
     faiss_index = FAISS.from_documents(sections, embedding_model)
     faiss_index.documents = sections
     progress_bar.empty()
