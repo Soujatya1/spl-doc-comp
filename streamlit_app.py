@@ -22,18 +22,11 @@ import json
 
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
-# Use session state to store file paths and results
-if 'temp_dir' not in st.session_state:
-    st.session_state.temp_dir = tempfile.mkdtemp()
-    
-if 'raw_results' not in st.session_state:
-    st.session_state.raw_results = None
-    
-if 'formatted_results' not in st.session_state:
-    st.session_state.formatted_results = None
-    
-if 'has_results' not in st.session_state:
-    st.session_state.has_results = False
+@st.cache_resource
+def get_temp_dir():
+    return tempfile.mkdtemp()
+
+temp_dir = get_temp_dir()
 
 def preprocess_text(text):
     """Cleans text: removes text in < > brackets, extra spaces, normalizes, lowercases, and removes punctuation (except periods)."""
@@ -635,205 +628,232 @@ def process_format_prompt(prompt, openai_api_key):
 
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
-        file_path = os.path.join(st.session_state.temp_dir, uploaded_file.name)
+        file_path = os.path.join(temp_dir, uploaded_file.name)
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         return file_path
     return None
 
-def run_comparison():
-    # Get values from session state
-    company_file = st.session_state.company_file
-    customer_file = st.session_state.customer_file
-    checklist_file = st.session_state.checklist_file
-    openai_api_key = st.session_state.openai_api_key
+def main():
+    st.title("Document Comparison Tool")
     
-    if not openai_api_key:
-        st.error("Please enter a valid OpenAI API Key")
-        return
+    with st.sidebar:
+        st.header("Upload Files")
+        company_file = st.file_uploader("Upload Company Document", type=["docx"])
+        customer_file = st.file_uploader("Upload Customer Document", type=["docx"])
+        checklist_file = st.file_uploader("Upload Checklist File", type=["xlsx"])
         
-    with st.spinner("Saving uploaded files..."):
-        company_path = save_uploaded_file(company_file)
-        customer_path = save_uploaded_file(customer_file)
-        checklist_path = save_uploaded_file(checklist_file)
+        st.header("API Settings")
+        openai_api_key = st.text_input("Enter OpenAI API Key", type="password", 
+                                     value="")
         
-        if not all([company_path, customer_path, checklist_path]):
-            st.error("Error saving uploaded files")
+        compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
+    
+    st.header("Document Comparison Results")
+    
+    if compare_btn:
+        if not openai_api_key:
+            st.error("Please enter a valid OpenAI API Key")
             return
-
-    checklist_df = pd.read_excel(checklist_path)
-
-    progress_container = st.container()
-
-    with progress_container:
-        st.subheader("Processing Documents")
-        
-        st.text("Storing company sections...")
-        company_progress = st.progress(0)
-        company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
-        
-        st.text("Storing customer sections...")
-        customer_progress = st.progress(0)
-        customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
-        
-        st.subheader("Comparing Sections")
-        final_rows = []
-        
-        for idx, row in checklist_df.iterrows():
-            section_name = row['PageName'].strip().lower()
-            start_marker = preprocess_text(row['StartMarker'])
-            end_marker = preprocess_text(row['EndMarker'])
             
-            st.text(f"Processing section: {section_name}")
+        with st.spinner("Saving uploaded files..."):
+            company_path = save_uploaded_file(company_file)
+            customer_path = save_uploaded_file(customer_file)
+            checklist_path = save_uploaded_file(checklist_file)
             
-            company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss)
-            customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss)
+            if not all([company_path, customer_path, checklist_path]):
+                st.error("Error saving uploaded files")
+                return
+    
+        checklist_df = pd.read_excel(checklist_path)
+    
+        progress_container = st.container()
+    
+        with progress_container:
+            st.subheader("Processing Documents")
             
-            if not company_section or not customer_section:
-                st.warning(f"Could not retrieve sections for {section_name}")
-                continue
+            st.text("Storing company sections...")
+            company_progress = st.progress(0)
+            company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
             
-            company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
-                           line.strip() and "[TABLE]" not in line]
-            customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
-                            line.strip() and "[TABLE]" not in line]
+            st.text("Storing customer sections...")
+            customer_progress = st.progress(0)
+            customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
             
-            for comp_line in company_lines:
-                best_cust_line = find_best_line_match(comp_line, customer_lines)
-                final_rows.append({
-                    "Section": section_name,
-                    "CompanyLine": comp_line,
-                    "CustomerLine": best_cust_line
-                })
-        
-        df = pd.DataFrame(final_rows).drop_duplicates()
-        df["order"] = df.index
-        
-        st.text("Filtering similar and different rows...")
-        
-        same_rows = []
-        different_rows = []
-        
-        for idx, row in df.iterrows():
-            norm_company = row["CompanyLine"].lower().replace(" ", "")
-            norm_customer = row["CustomerLine"].lower().replace(" ", "")
+            st.subheader("Comparing Sections")
+            final_rows = []
             
-            if norm_company == norm_customer:
-                same_rows.append({**row, "Comparison": "SAME"})
-            elif norm_company in norm_customer:
-                same_rows.append({**row, "Comparison": "SAME"})
-            elif norm_customer == "":
-                different_rows.append({**row, "Comparison": "DIFFERENT", 
+            for idx, row in checklist_df.iterrows():
+                section_name = row['PageName'].strip().lower()
+                start_marker = preprocess_text(row['StartMarker'])
+                end_marker = preprocess_text(row['EndMarker'])
+                
+                st.text(f"Processing section: {section_name}")
+                
+                company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss)
+                customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss)
+                
+                if not company_section or not customer_section:
+                    st.warning(f"Could not retrieve sections for {section_name}")
+                    continue
+                
+                company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
+                               line.strip() and "[TABLE]" not in line]
+                customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
+                                line.strip() and "[TABLE]" not in line]
+                
+                for comp_line in company_lines:
+                    best_cust_line = find_best_line_match(comp_line, customer_lines)
+                    final_rows.append({
+                        "Section": section_name,
+                        "CompanyLine": comp_line,
+                        "CustomerLine": best_cust_line
+                    })
+            
+            df = pd.DataFrame(final_rows).drop_duplicates()
+            df["order"] = df.index
+            
+            st.text("Filtering similar and different rows...")
+            
+            same_rows = []
+            different_rows = []
+            
+            for idx, row in df.iterrows():
+                # Convert row to a dictionary explicitly to avoid dtype errors
+                row_dict = row.to_dict()
+    
+                norm_company = row_dict["CompanyLine"].lower().replace(" ", "")
+                norm_customer = row_dict["CustomerLine"].lower().replace(" ", "")
+    
+                if norm_company == norm_customer:
+                    same_rows.append({**row_dict, "Comparison": "SAME"})
+                elif norm_company in norm_customer:
+                    same_rows.append({**row_dict, "Comparison": "SAME"})
+                elif norm_customer == "":
+                    same_rows.append({**row_dict, "Comparison": "DIFFERENT", 
                                      "Difference": "Could not find similar line in customer document"})
+                else:
+                    different_rows.append(row_dict)
+            
+            df_same = pd.DataFrame(same_rows)
+            df_different = pd.DataFrame(different_rows)
+            
+            st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
+            
+            if not df_different.empty:
+                st.text("Analyzing differences with LLM...")
+                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=20)
             else:
-                different_rows.append(row)
-        
-        df_same = pd.DataFrame(same_rows)
-        df_different = pd.DataFrame(different_rows)
-        
-        st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
-        if df_different.shape[0] > 0:
-            st.text("Comparing potentially different rows with LLM...")
-    
-    # Print the type before comparison
-            st.text(f"Type of df_different before comparison: {type(df_different)}")
-    
-            result = compare_dataframe(df_different, openai_api_key)
-    
-    # Print the type after comparison
-            st.text(f"Type of result after comparison: {type(result)}")
-    
-    # Check if it's a DataFrame or something else
-            if isinstance(result, pd.DataFrame):
-                df_different = result
-            else:
-                st.error(f"compare_dataframe returned {type(result)} instead of DataFrame")
-        # Try to convert it to a DataFrame if possible
-                try:
-                    if isinstance(result, dict):
-                        df_different = pd.DataFrame([result])
-                    elif isinstance(result, list):
-                        df_different = pd.DataFrame(result)
-                    else:
-                # Fall back to original df_different
-                        st.warning("Could not convert result to DataFrame, using original df_different")
-                except Exception as e:
-                    st.error(f"Error converting to DataFrame: {e}")
-            # Keep the original df_different
-    
-    # Combine the results
-            df_results = pd.concat([df_same, df_different]).sort_values("order")
-    
-    # Store the raw results in session state
-            st.session_state.raw_results = df_results
-    
-    # Process the formatted output
-            st.text("Generating formatted output...")
+                df_diff_compared = df_different.copy()
+                
+            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
+            df_final = df_final.drop(columns=["order"])
+            
             section_differences = {}
-    
-            for section_name, section_df in df_results[df_results["Comparison"] == "DIFFERENT"].groupby("Section"):
-                section_differences[section_name] = section_df.to_dict('records')
-    
-            if section_differences:
-                formatted_output = generate_formatted_output(section_differences, openai_api_key)
-                st.session_state.formatted_results = formatted_output
-                st.session_state.has_results = True
+            for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
+                section = row["Section"]
+                if section not in section_differences:
+                    section_differences[section] = []
+                section_differences[section].append({
+                    "CompanyLine": row["CompanyLine"],
+                    "CustomerLine": row["CustomerLine"],
+                    "Difference": row["Difference"]
+                })
+            
+            st.text("Generating formatted output...")
+            formatted_output = generate_formatted_output(section_differences, openai_api_key)
+            
+            if formatted_output:
+                output_df = pd.DataFrame(formatted_output)
+                output_df.columns = [
+                    "Samples affected", 
+                    "Observation - Category", 
+                    "Page", 
+                    "Sub-category of Observation"
+                ]
             else:
-                st.info("No differences found between documents.")
-        else:
-            st.info("No differences found between documents.")
-            st.session_state.raw_results = df_same
-            st.session_state.has_results = True
-
-# UI Layout
-st.title("Document Comparison Tool")
-
-with st.expander("Settings", expanded=True):
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.file_uploader("Upload Company Document (DOCX)", type=["docx"], key="company_file")
-        st.file_uploader("Upload Customer Document (DOCX)", type=["docx"], key="customer_file")
-    
-    with col2:
-        st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"], key="checklist_file")
-        st.text_input("OpenAI API Key", type="password", key="openai_api_key")
-
-if (st.session_state.company_file is not None and 
-    st.session_state.customer_file is not None and 
-    st.session_state.checklist_file is not None):
-    
-    st.button("Compare Documents", on_click=run_comparison)
-
-# Display results if available
-if st.session_state.has_results:
-    st.header("Comparison Results")
-    
-    if st.session_state.raw_results is not None:
-        with st.expander("Raw Results", expanded=False):
-            st.dataframe(st.session_state.raw_results)
-        
-        # Count differences
-        diff_count = len(st.session_state.raw_results[st.session_state.raw_results["Comparison"] == "DIFFERENT"])
-        st.info(f"Found {diff_count} differences between documents.")
-        
-        # Display formatted results
-        if st.session_state.formatted_results:
-            st.subheader("Formatted Differences")
-            for item in st.session_state.formatted_results:
-                st.write("---")
-                st.write(f"**Samples Affected:** {item.get('samples_affected', 'Not specified')}")
-                st.write(f"**Category:** {item.get('observation_category', 'Not categorized')}")
-                st.write(f"**Page:** {item.get('page', item.get('Page', 'Not specified'))}")
-                st.write(f"**Issue:** {item.get('sub_category', 'Not specified')}")
+                output_df = pd.DataFrame(columns=[
+                    "Samples affected", 
+                    "Observation - Category", 
+                    "Page", 
+                    "Sub-category of Observation"
+                ])
             
-            # Download option
-            formatted_df = pd.DataFrame(st.session_state.formatted_results)
-            csv = formatted_df.to_csv(index=False)
+            progress_container.empty()
             
-            st.download_button(
-                label="Download Formatted Results (CSV)",
-                data=csv,
-                file_name="document_comparison_results.csv",
-                mime="text/csv"
+            st.subheader("Comparison Results - Raw Differences")
+            
+            st.sidebar.header("Raw Difference Filters")
+            section_filter = st.sidebar.multiselect(
+                "Filter by Section",
+                options=df_final["Section"].unique(),
+                default=df_final["Section"].unique()
             )
+            
+            comparison_filter = st.sidebar.multiselect(
+                "Filter by Comparison",
+                options=df_final["Comparison"].unique(),
+                default=df_final["Comparison"].unique()
+            )
+            
+            filtered_df = df_final[
+                df_final["Section"].isin(section_filter) & 
+                df_final["Comparison"].isin(comparison_filter)
+            ]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Lines", len(df_final))
+                st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
+            with col2:
+                st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
+                st.metric("Filtered Results", len(filtered_df))
+            
+            st.dataframe(
+                filtered_df.style.apply(
+                    lambda row: ['background-color: #ffcccc' if row['Comparison'] == 'DIFFERENT' else 'background-color: #ccffcc' for _ in row], 
+                    axis=1
+                ),
+                height=400
+            )
+            
+            st.subheader("Formatted Output")
+            st.dataframe(
+                output_df.style.apply(
+                    lambda _: ['background-color: #e6f3ff' for _ in range(len(output_df.columns))], 
+                    axis=1
+                ),
+                height=300
+            )
+            
+            st.text("Export Options")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                excel_buffer = io.BytesIO()
+                filtered_df.to_excel(excel_buffer, index=False)
+                excel_buffer.seek(0)
+    
+                st.download_button(
+                    label="Download Raw Results",
+                    data=excel_buffer,
+                    file_name="document_comparison_raw.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="raw_download"  # Add a unique key
+                )
+
+            with col2:
+                formatted_buffer = io.BytesIO()
+                output_df.to_excel(formatted_buffer, index=False)
+                formatted_buffer.seek(0)
+    
+                st.download_button(
+                    label="Download Formatted Results",
+                    data=formatted_buffer,
+                    file_name="document_comparison_formatted.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="formatted_download"  # Add a unique key
+                )
+
+if __name__ == "__main__":
+    main()
