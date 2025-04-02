@@ -419,17 +419,19 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
     return df
 
 def create_single_format_prompt(section_differences):
-    """Create a single format prompt for given section differences."""
+    """Create a single format prompt for given section differences with summarization."""
     prompt = (
         "I'm analyzing differences between company and customer documents. "
-        "For each section with differences, I need you to categorize them into the following format:\n\n"
+        "For each section with differences, I need you to summarize and categorize them into the following format:\n\n"
         "1. Samples affected - a list of sample IDs or 'All Samples' which are the Customer document name (without extension like .docx) if the issue affects all samples\n"
         "2. Observation Category - categorize the issue into one of these categories:\n"
         "   - 'Mismatch of content between Filed Copy and customer copy'\n"
         "   - 'Available in Filed Copy but missing in Customer Copy'\n"
         "   - Other relevant category if these don't fit\n"
         "3. Page - the section name where the issue was found\n"
-        "4. Sub-category of Observation - a concise description of what specifically differs\n\n"
+        "4. Sub-category of Observation - a concise description that summarizes all the differences for this page\n\n"
+        "IMPORTANT: Summarize all differences for the same page into at most TWO rows in your response. "
+        "Group similar differences together and provide a consolidated summary rather than listing each individual difference.\n\n"
         "Here are the differences found per section:\n\n"
     )
     
@@ -446,7 +448,8 @@ def create_single_format_prompt(section_differences):
         "- 'samples_affected': String (e.g., 'All Samples' or specific IDs)\n"
         "- 'observation_category': String (the category of the issue)\n"
         "- 'page': String (the section name)\n"
-        "- 'sub_category': String (detailed description of the specific issue)\n\n"
+        "- 'sub_category': String (a summarized description of all issues found in this page, consolidating similar differences)\n\n"
+        "Remember to provide AT MOST 2 rows per page, summarizing multiple differences into concise categories.\n\n"
         "Return ONLY the JSON with no additional text."
     )
     
@@ -483,7 +486,7 @@ def format_output_prompt(section_differences):
 
 @st.cache_data
 def generate_formatted_output(_section_differences, openai_api_key):
-    """Generate formatted output from section differences with caching"""
+    """Generate formatted output from section differences with caching and summarization"""
     # Make a deep copy to avoid modifying the original
     section_differences = _section_differences.copy()
     
@@ -495,10 +498,10 @@ def generate_formatted_output(_section_differences, openai_api_key):
         
         openai_llm = ChatOpenAI(
             api_key=openai_api_key,
-            model_name="gpt-3.5-turbo"
+            model_name="gpt-3.5-turbo-16k"  # Using a larger context model
         )
         
-        with st.spinner(f"Generating formatted output chunk {i+1}/{len(prompts)} with LLM..."):
+        with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
             response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
         
         if not response.strip():
@@ -514,8 +517,22 @@ def generate_formatted_output(_section_differences, openai_api_key):
                 formatted_output = json.loads(json_text)
             else:
                 formatted_output = json.loads(response_text)
+            
+            # Post-process to ensure we have at most 2 rows per page
+            page_summaries = {}
+            for item in formatted_output:
+                page = item.get('page', '')
+                if page not in page_summaries:
+                    page_summaries[page] = []
+                if len(page_summaries[page]) < 2:  # Limit to at most 2 entries per page
+                    page_summaries[page].append(item)
+            
+            # Flatten the dictionary back to a list
+            consolidated_output = []
+            for page_items in page_summaries.values():
+                consolidated_output.extend(page_items)
                 
-            all_formatted_outputs.extend(formatted_output)
+            all_formatted_outputs.extend(consolidated_output)
             
             # Add delay between chunks if needed
             if i < len(prompts) - 1:
@@ -525,7 +542,20 @@ def generate_formatted_output(_section_differences, openai_api_key):
             st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
             st.code(response)
     
-    return all_formatted_outputs
+    # Final post-processing to ensure we have at most 2 rows per page
+    page_to_items = {}
+    for item in all_formatted_outputs:
+        page = item.get('page', '')
+        if page not in page_to_items:
+            page_to_items[page] = []
+        if len(page_to_items[page]) < 2:  # Limit to at most 2 entries per page
+            page_to_items[page].append(item)
+    
+    final_output = []
+    for page_items in page_to_items.values():
+        final_output.extend(page_items)
+    
+    return final_output
 
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
