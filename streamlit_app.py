@@ -709,7 +709,7 @@ def display_results():
             st.session_state.final_df = None
             st.session_state.output_df = None
             st.rerun()
-        return
+        
         
     if st.session_state.final_df is not None:
         # Display metrics
