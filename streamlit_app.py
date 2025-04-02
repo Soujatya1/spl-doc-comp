@@ -20,13 +20,26 @@ from langchain_openai import ChatOpenAI
 import tiktoken
 import json
 
+# Configure page settings
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
-@st.cache_resource
-def get_temp_dir():
-    return tempfile.mkdtemp()
+# Initialize session state for key variables
+if 'comparison_completed' not in st.session_state:
+    st.session_state.comparison_completed = False
+if 'company_faiss' not in st.session_state:
+    st.session_state.company_faiss = None
+if 'customer_faiss' not in st.session_state:
+    st.session_state.customer_faiss = None
+if 'final_df' not in st.session_state:
+    st.session_state.final_df = None
+if 'output_df' not in st.session_state:
+    st.session_state.output_df = None
+if 'processing_step' not in st.session_state:
+    st.session_state.processing_step = None
+if 'temp_dir' not in st.session_state:
+    st.session_state.temp_dir = tempfile.mkdtemp()
 
-temp_dir = get_temp_dir()
+temp_dir = st.session_state.temp_dir
 
 def preprocess_text(text):
     """Cleans text: removes text in < > brackets, extra spaces, normalizes, lowercases, and removes punctuation (except periods)."""
@@ -48,28 +61,6 @@ def truncate_text(text, max_tokens=100):
     tokens = encoding.encode(text)
     return encoding.decode(tokens[:max_tokens])
 
-def chunk_dataframe_with_token_reduction(df, max_tokens=5000):
-    chunks = []
-    current_chunk = []
-    current_tokens = 0
-    
-    for _, row in df.iterrows():
-        row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
-        row_tokens = count_tokens(row_text)
-        
-        if current_tokens + row_tokens > max_tokens:
-            chunks.append(pd.DataFrame(current_chunk))
-            current_chunk = []
-            current_tokens = 0
-        
-        current_chunk.append(row)
-        current_tokens += row_tokens
-    
-    if current_chunk:
-        chunks.append(pd.DataFrame(current_chunk))
-    
-    return chunks
-    
 def iter_block_items(parent):
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
@@ -151,14 +142,16 @@ def extract_section(extracted_data, start_marker, end_marker):
     except ValueError:
         return combined_text
 
-def store_sections_in_faiss(docx_path, checklist_df, progress_bar=None):
+@st.cache_data
+def store_sections_in_faiss(docx_path, checklist_df):
+    """Store document sections in FAISS with caching"""
+    progress_bar = st.progress(0)
     extracted_data = extract_text_by_sections(docx_path)
     sections = []
     
     total_rows = len(checklist_df)
     for idx, row in checklist_df.iterrows():
-        if progress_bar:
-            progress_bar.progress((idx + 1) / total_rows)
+        progress_bar.progress((idx + 1) / total_rows)
             
         section_name = row['PageName'].strip().lower()
         start_marker = preprocess_text(row['StartMarker'])
@@ -173,10 +166,11 @@ def store_sections_in_faiss(docx_path, checklist_df, progress_bar=None):
             }
             doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
             sections.append(doc_obj)
-            
+    
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     faiss_index = FAISS.from_documents(sections, embedding_model)
     faiss_index.documents = sections
+    progress_bar.empty()
     return faiss_index
 
 def split_text_into_lines(text):
@@ -204,7 +198,6 @@ def find_best_line_match(target, lines):
         return ""
 
 def extract_content_within_markers(text, start_marker, end_marker):
-
     lines = text.split("\n")
     best_start = find_closest_match(start_marker, lines)
     best_end = find_closest_match(end_marker, lines)
@@ -222,9 +215,7 @@ def extract_content_within_markers(text, start_marker, end_marker):
         return text
 
 def retrieve_section(page_name, start_marker, end_marker, faiss_index):
-    """
-    Retrieves all documents from the FAISS index whose metadata contains the specified criteria.
-    """
+    """Retrieves all documents from the FAISS index whose metadata contains the specified criteria."""
     matching_sections = []
     for doc in faiss_index.documents:
         metadata = doc.metadata
@@ -238,27 +229,8 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
             })
     return matching_sections
 
-def format_batch_prompt(df_batch):
-    
-    prompt_lines = []
-    for idx, row in df_batch.iterrows():
-        prompt_lines.append(f"Row {idx}:")
-        prompt_lines.append(f"Company: {row['CompanyLine']}")
-        prompt_lines.append(f"Customer: {row['CustomerLine']}")
-        prompt_lines.append("---")
-    prompt_text = "\n".join(prompt_lines)
-    prompt_text += (
-        "\n\nCompare the above rows line by line. "
-        "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. I want output in JSON only. Do not mention anything else in the response."
-    )
-    return prompt_text
-
 def process_batch(df_batch, openai_api_key):
-    """
-    Process a batch of rows with improved prompt construction and error handling.
-    Non-recursive implementation.
-    """
+    """Process a batch of rows with improved prompt construction and error handling."""
     # Prepare the prompt with fixed truncation
     prompt_lines = []
     for idx, row in df_batch.iterrows():
@@ -281,11 +253,11 @@ def process_batch(df_batch, openai_api_key):
     total_tokens = count_tokens(prompt_text)
     st.info(f"Batch Prompt Tokens: {total_tokens}")
     
-    # If the prompt is still too large, we need to further split the batch
+    # If the prompt is still too large, split the batch
     if total_tokens > 4000:
         st.warning(f"Prompt too large ({total_tokens} tokens). Splitting batch.")
         
-        # Instead of recursion, split the batch in half and process each separately
+        # Split the batch in half and process each separately
         half_size = len(df_batch) // 2
         if half_size == 0:  # Can't split further
             st.error("Cannot split batch further. Individual rows may be too large.")
@@ -349,17 +321,11 @@ def process_batch(df_batch, openai_api_key):
     return comparisons
 
 def chunk_dataframe_into_batches(df, batch_size=50):
-    """
-    Split a dataframe into chunks of specified batch size.
-    Returns a list of dataframe chunks.
-    """
+    """Split a dataframe into chunks of specified batch size."""
     return [df.iloc[i:i+batch_size] for i in range(0, len(df), batch_size)]
 
 def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
-    """
-    Split a dataframe into chunks based on token count.
-    Returns a list of dataframe chunks.
-    """
+    """Split a dataframe into chunks based on token count."""
     chunks = []
     current_chunk = []
     current_tokens = 0
@@ -370,6 +336,7 @@ def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
         
         # If this single row exceeds max tokens, truncate it
         if row_tokens > max_tokens:
+            row = row.copy()  # Create a copy to avoid modifying the original
             row['CompanyLine'] = truncate_text(row['CompanyLine'], max_tokens // 2)
             row['CustomerLine'] = truncate_text(row['CustomerLine'], max_tokens // 2)
             row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
@@ -388,7 +355,12 @@ def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
     
     return chunks
 
-def compare_dataframe(df, openai_api_key, batch_size=50, rate_limit_delay=20):
+@st.cache_data
+def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
+    """Compare dataframe contents with caching to prevent re-processing"""
+    # Make a deep copy to avoid modifying the original
+    df = _df.copy()
+    
     if df.empty:
         return df
     
@@ -446,51 +418,8 @@ def compare_dataframe(df, openai_api_key, batch_size=50, rate_limit_delay=20):
     
     return df
 
-def format_output_prompt(section_differences):
-    """
-    Create a prompt for the second LLM call to format the differences.
-    Uses a non-recursive approach for chunking.
-    """
-    # Count total differences
-    total_differences = sum(len(diffs) for diffs in section_differences.values())
-    
-    # If small enough, process all at once
-    if total_differences <= 20:
-        return [create_single_format_prompt(section_differences)]
-    
-    # Otherwise, chunk by sections
-    prompts = []
-    current_sections = {}
-    current_diff_count = 0
-    max_diff_per_prompt = 15
-    
-    for section, differences in section_differences.items():
-        # If adding this section would exceed our limit and we already have content
-        if current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
-            # Create a prompt from current accumulated sections
-            prompts.append(create_single_format_prompt(current_sections))
-            current_sections = {}
-            current_diff_count = 0
-        
-        # If a single section has too many differences, split it
-        if len(differences) > max_diff_per_prompt:
-            for i in range(0, len(differences), max_diff_per_prompt):
-                chunk = differences[i:i+max_diff_per_prompt]
-                prompts.append(create_single_format_prompt({section: chunk}))
-        else:
-            current_sections[section] = differences
-            current_diff_count += len(differences)
-    
-    # Add any remaining sections
-    if current_diff_count > 0:
-        prompts.append(create_single_format_prompt(current_sections))
-    
-    return prompts
-
 def create_single_format_prompt(section_differences):
-    """
-    Create a single format prompt for given section differences.
-    """
+    """Create a single format prompt for given section differences."""
     prompt = (
         "I'm analyzing differences between company and customer documents. "
         "For each section with differences, I need you to categorize them into the following format:\n\n"
@@ -523,37 +452,41 @@ def create_single_format_prompt(section_differences):
     
     return prompt
 
-def chunk_section_differences(section_differences):
-    """
-    Split large section differences into multiple prompts.
-    Returns a list of prompts.
-    """
+def format_output_prompt(section_differences):
+    """Create prompts for the second LLM call to format the differences."""
     prompts = []
     current_sections = {}
     current_diff_count = 0
-    max_diff_per_prompt = 20  # Adjust based on testing
+    max_diff_per_prompt = 15
     
     for section, differences in section_differences.items():
         if current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
             # Create a prompt from current accumulated sections
-            prompts.append(format_output_prompt(current_sections))
+            prompts.append(create_single_format_prompt(current_sections))
             current_sections = {}
             current_diff_count = 0
         
-        current_sections[section] = differences
-        current_diff_count += len(differences)
+        # If a single section has too many differences, split it
+        if len(differences) > max_diff_per_prompt:
+            for i in range(0, len(differences), max_diff_per_prompt):
+                chunk = differences[i:i+max_diff_per_prompt]
+                prompts.append(create_single_format_prompt({section: chunk}))
+        else:
+            current_sections[section] = differences
+            current_diff_count += len(differences)
     
     # Add any remaining sections
     if current_diff_count > 0:
-        prompts.append(format_output_prompt(current_sections))
+        prompts.append(create_single_format_prompt(current_sections))
     
     return prompts
 
-def generate_formatted_output(section_differences, openai_api_key):
-    """
-    Generate formatted output from section differences.
-    Non-recursive implementation.
-    """
+@st.cache_data
+def generate_formatted_output(_section_differences, openai_api_key):
+    """Generate formatted output from section differences with caching"""
+    # Make a deep copy to avoid modifying the original
+    section_differences = _section_differences.copy()
+    
     prompts = format_output_prompt(section_differences)
     all_formatted_outputs = []
     
@@ -594,38 +527,6 @@ def generate_formatted_output(section_differences, openai_api_key):
     
     return all_formatted_outputs
 
-def process_format_prompt(prompt, openai_api_key):
-    """
-    Process a single formatting prompt.
-    """
-    openai_llm = ChatOpenAI(
-        api_key=openai_api_key,
-        model_name="gpt-3.5-turbo"
-    )
-    
-    with st.spinner("Generating formatted output with LLM..."):
-        response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
-    
-    if not response.strip():
-        st.warning("Empty response from format LLM.")
-        return []
-    
-    try:
-        response_text = response.strip()
-        start_idx = response_text.find('[')
-        end_idx = response_text.rfind(']') + 1
-        if start_idx >= 0 and end_idx > 0:
-            json_text = response_text[start_idx:end_idx]
-            formatted_output = json.loads(json_text)
-        else:
-            formatted_output = json.loads(response_text)
-    except Exception as e:
-        st.error(f"Error parsing LLM format response: {e}")
-        st.code(response)
-        formatted_output = []
-        
-    return formatted_output
-
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
         file_path = os.path.join(temp_dir, uploaded_file.name)
@@ -634,53 +535,37 @@ def save_uploaded_file(uploaded_file):
         return file_path
     return None
 
-def main():
-    st.title("Document Comparison Tool")
+def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
+    """Run the comparison process in steps, with state tracking"""
+    progress_container = st.empty()
     
-    with st.sidebar:
-        st.header("Upload Files")
-        company_file = st.file_uploader("Upload Company Document", type=["docx"])
-        customer_file = st.file_uploader("Upload Customer Document", type=["docx"])
-        checklist_file = st.file_uploader("Upload Checklist File", type=["xlsx"])
-        
-        st.header("API Settings")
-        openai_api_key = st.text_input("Enter OpenAI API Key", type="password", 
-                                     value="")
-        
-        compare_btn = st.button("Run Comparison", type="primary", disabled=not (company_file and customer_file and checklist_file))
-    
-    st.header("Document Comparison Results")
-    
-    if compare_btn:
-        if not openai_api_key:
-            st.error("Please enter a valid OpenAI API Key")
-            return
-            
-        with st.spinner("Saving uploaded files..."):
-            company_path = save_uploaded_file(company_file)
-            customer_path = save_uploaded_file(customer_file)
-            checklist_path = save_uploaded_file(checklist_file)
-            
-            if not all([company_path, customer_path, checklist_path]):
-                st.error("Error saving uploaded files")
-                return
-    
-        checklist_df = pd.read_excel(checklist_path)
-    
-        progress_container = st.container()
-    
-        with progress_container:
-            st.subheader("Processing Documents")
-            
+    try:
+        # Step 1: Load checklist
+        with progress_container.container():
+            st.subheader("Step 1: Loading Checklist")
+            checklist_df = pd.read_excel(checklist_path)
+            st.session_state.processing_step = "load_checklist"
+            st.success("✅ Checklist loaded successfully")
+
+        # Step 2: Process company document
+        with progress_container.container():
+            st.subheader("Step 2: Processing Company Document")
             st.text("Storing company sections...")
-            company_progress = st.progress(0)
-            company_faiss = store_sections_in_faiss(company_path, checklist_df, company_progress)
-            
+            st.session_state.company_faiss = store_sections_in_faiss(company_path, checklist_df)
+            st.session_state.processing_step = "company_faiss"
+            st.success("✅ Company document processed successfully")
+
+        # Step 3: Process customer document
+        with progress_container.container():
+            st.subheader("Step 3: Processing Customer Document")
             st.text("Storing customer sections...")
-            customer_progress = st.progress(0)
-            customer_faiss = store_sections_in_faiss(customer_path, checklist_df, customer_progress)
-            
-            st.subheader("Comparing Sections")
+            st.session_state.customer_faiss = store_sections_in_faiss(customer_path, checklist_df)
+            st.session_state.processing_step = "customer_faiss"
+            st.success("✅ Customer document processed successfully")
+
+        # Step 4: Compare sections
+        with progress_container.container():
+            st.subheader("Step 4: Comparing Sections")
             final_rows = []
             
             for idx, row in checklist_df.iterrows():
@@ -690,8 +575,8 @@ def main():
                 
                 st.text(f"Processing section: {section_name}")
                 
-                company_section = retrieve_section(section_name, start_marker, end_marker, company_faiss)
-                customer_section = retrieve_section(section_name, start_marker, end_marker, customer_faiss)
+                company_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.company_faiss)
+                customer_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.customer_faiss)
                 
                 if not company_section or not customer_section:
                     st.warning(f"Could not retrieve sections for {section_name}")
@@ -712,8 +597,12 @@ def main():
             
             df = pd.DataFrame(final_rows).drop_duplicates()
             df["order"] = df.index
-            
-            st.text("Filtering similar and different rows...")
+            st.session_state.processing_step = "initial_comparison"
+            st.success("✅ Initial comparison completed")
+
+        # Step 5: Filter and analyze differences
+        with progress_container.container():
+            st.subheader("Step 5: Filtering Similar and Different Rows")
             
             same_rows = []
             different_rows = []
@@ -732,33 +621,51 @@ def main():
                 else:
                     different_rows.append(row)
             
-            df_same = pd.DataFrame(same_rows)
-            df_different = pd.DataFrame(different_rows)
+            df_same = pd.DataFrame(same_rows) if same_rows else pd.DataFrame()
+            df_different = pd.DataFrame(different_rows) if different_rows else pd.DataFrame()
             
             st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
+            st.session_state.processing_step = "filtered_rows"
+            st.success("✅ Filtering completed")
+
+        # Step 6: Analyze differences with LLM
+        with progress_container.container():
+            st.subheader("Step 6: Analyzing Differences with LLM")
             
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
                 df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
             else:
                 df_diff_compared = df_different.copy()
-                
-            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order")
-            df_final = df_final.drop(columns=["order"])
+            
+            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order") if not df_same.empty or not df_diff_compared.empty else pd.DataFrame()
+            if not df_final.empty:
+                df_final = df_final.drop(columns=["order"])
+            
+            st.session_state.final_df = df_final
+            st.session_state.processing_step = "difference_analysis"
+            st.success("✅ Difference analysis completed")
+
+        # Step 7: Format output
+        with progress_container.container():
+            st.subheader("Step 7: Generating Formatted Output")
             
             section_differences = {}
-            for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
-                section = row["Section"]
-                if section not in section_differences:
-                    section_differences[section] = []
-                section_differences[section].append({
-                    "CompanyLine": row["CompanyLine"],
-                    "CustomerLine": row["CustomerLine"],
-                    "Difference": row["Difference"]
-                })
+            if not df_final.empty:
+                for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
+                    section = row["Section"]
+                    if section not in section_differences:
+                        section_differences[section] = []
+                    section_differences[section].append({
+                        "CompanyLine": row["CompanyLine"],
+                        "CustomerLine": row["CustomerLine"],
+                        "Difference": row["Difference"]
+                    })
             
-            st.text("Generating formatted output...")
-            formatted_output = generate_formatted_output(section_differences, openai_api_key)
+            formatted_output = []
+            if section_differences:
+                st.text("Generating formatted output...")
+                formatted_output = generate_formatted_output(section_differences, openai_api_key)
             
             if formatted_output:
                 output_df = pd.DataFrame(formatted_output)
@@ -776,79 +683,115 @@ def main():
                     "Sub-category of Observation"
                 ])
             
-            progress_container.empty()
-            
-            st.subheader("Comparison Results - Raw Differences")
-            
-            st.sidebar.header("Raw Difference Filters")
-            section_filter = st.sidebar.multiselect(
-                "Filter by Section",
-                options=df_final["Section"].unique(),
-                default=df_final["Section"].unique()
-            )
-            
-            comparison_filter = st.sidebar.multiselect(
-                "Filter by Comparison",
-                options=df_final["Comparison"].unique(),
-                default=df_final["Comparison"].unique()
-            )
-            
-            filtered_df = df_final[
-                df_final["Section"].isin(section_filter) & 
-                df_final["Comparison"].isin(comparison_filter)
-            ]
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Lines", len(df_final))
-                st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
-            with col2:
-                st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
-                st.metric("Filtered Results", len(filtered_df))
-            
-            st.dataframe(
-                filtered_df.style.apply(
-                    lambda row: ['background-color: #ffcccc' if row['Comparison'] == 'DIFFERENT' else 'background-color: #ccffcc' for _ in row], 
-                    axis=1
-                ),
-                height=400
-            )
-            
+            st.session_state.output_df = output_df
+            st.session_state.comparison_completed = True
+            st.session_state.processing_step = "complete"
+            st.success("✅ Formatted output generated successfully")
+
+        progress_container.empty()
+        return True
+        
+    except Exception as e:
+        progress_container.error(f"Error occurred during processing: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return False
+
+def display_results():
+    """Display the comparison results"""
+    st.header("Document Comparison Results")
+    
+    if st.session_state.final_df is not None:
+        # Display metrics
+        df_final = st.session_state.final_df
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Lines", len(df_final))
+            st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
+        with col2:
+            st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
+            percentage_different = (len(df_final[df_final["Comparison"] == "DIFFERENT"]) / len(df_final) * 100) if len(df_final) > 0 else 0
+            st.metric("Difference Percentage", f"{percentage_different:.2f}%")
+        
+        # Display tabs for different views
+        tab1, tab2, tab3 = st.tabs(["All Comparisons", "Differences Only", "Formatted Output"])
+        
+        with tab1:
+            st.subheader("All Comparisons")
+            st.dataframe(df_final, use_container_width=True)
+        
+        with tab2:
+            st.subheader("Differences Only")
+            differences_df = df_final[df_final["Comparison"] == "DIFFERENT"].reset_index(drop=True)
+            st.dataframe(differences_df, use_container_width=True)
+        
+        with tab3:
             st.subheader("Formatted Output")
-            st.dataframe(
-                output_df.style.apply(
-                    lambda _: ['background-color: #e6f3ff' for _ in range(len(output_df.columns))], 
-                    axis=1
-                ),
-                height=300
-            )
-            
-            st.text("Export Options")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                excel_path = os.path.join(temp_dir, "comparison_results.xlsx")
-                filtered_df.to_excel(excel_path, index=False)
+            if st.session_state.output_df is not None and not st.session_state.output_df.empty:
+                st.dataframe(st.session_state.output_df, use_container_width=True)
                 
-                with open(excel_path, "rb") as f:
-                    st.download_button(
-                        label="Download Raw Results",
-                        data=f,
-                        file_name="document_comparison_raw.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                # Add download button for Excel export
+                output_excel = st.session_state.output_df.to_excel(index=False)
+                st.download_button(
+                    label="Download Formatted Report",
+                    data=output_excel,
+                    file_name="document_comparison_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No differences found that require formatting.")
+    else:
+        st.info("No comparison results available yet. Please run a comparison first.")
+
+def main():
+    st.title("Document Comparison Tool")
+    
+    # Instructions
+    with st.expander("How to Use"):
+        st.markdown("""
+        ### Instructions
+        1. Upload the company document (DOCX format)
+        2. Upload the customer document (DOCX format) 
+        3. Upload the checklist Excel file
+        4. Enter your OpenAI API key
+        5. Click "Run Comparison"
+        
+        ### About the Tool
+        This tool compares two documents section by section based on the checklist provided.
+        It identifies differences between the documents and categorizes them for easy review.
+        """)
+    
+    # File uploads
+    col1, col2 = st.columns(2)
+    with col1:
+        company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
+    with col2:
+        customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
+    
+    checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
+    
+    # API key input
+    openai_api_key = st.text_input("Enter OpenAI API Key", type="password")
+    
+    # Run comparison button
+    if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and openai_api_key)):
+        with st.spinner("Processing..."):
+            # Save uploaded files to temp directory
+            company_path = save_uploaded_file(company_file)
+            customer_path = save_uploaded_file(customer_file)
+            checklist_path = save_uploaded_file(checklist_file)
             
-            with col2:
-                formatted_path = os.path.join(temp_dir, "formatted_results.xlsx")
-                output_df.to_excel(formatted_path, index=False)
-                
-                with open(formatted_path, "rb") as f:
-                    st.download_button(
-                        label="Download Formatted Results",
-                        data=f,
-                        file_name="document_comparison_formatted.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+            # Run comparison
+            success = run_comparison(company_path, customer_path, checklist_path, openai_api_key)
+            
+            if success:
+                st.success("Comparison completed successfully!")
+            else:
+                st.error("Comparison failed. Check logs for details.")
+    
+    # Display results if comparison is completed
+    if st.session_state.comparison_completed:
+        display_results()
 
 if __name__ == "__main__":
     main()
