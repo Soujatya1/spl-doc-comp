@@ -735,20 +735,25 @@ def run_comparison():
         if df_different.shape[0] > 0:
             st.text("Comparing potentially different rows with LLM...")
             df_different = compare_dataframe(df_different, openai_api_key)
-            
+    
+            # First ensure df_different is a DataFrame
+            if not isinstance(df_different, pd.DataFrame):
+                st.error("Error: compare_dataframe did not return a DataFrame")
+                df_different = pd.DataFrame(df_different) if isinstance(df_different, list) else pd.DataFrame([df_different])
+    
             # Combine the results
             df_results = pd.concat([df_same, df_different]).sort_values("order")
-            
+    
             # Store the raw results in session state
             st.session_state.raw_results = df_results
-            
+    
             # Process the formatted output
             st.text("Generating formatted output...")
             section_differences = {}
-            
+    
             for section_name, section_df in df_results[df_results["Comparison"] == "DIFFERENT"].groupby("Section"):
                 section_differences[section_name] = section_df.to_dict('records')
-            
+    
             if section_differences:
                 formatted_output = generate_formatted_output(section_differences, openai_api_key)
                 st.session_state.formatted_results = formatted_output
