@@ -713,6 +713,7 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
                 ]
             else:
                 output_df = pd.DataFrame(columns=[
+                    "Serial No."
                     "Samples affected", 
                     "Observation - Category", 
                     "Page", 
