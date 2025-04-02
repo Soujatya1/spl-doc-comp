@@ -9,3 +9,4 @@ sentence-transformers
 faiss-cpu
 langchain-openai
 tensorflow_hub
+tensorflow
