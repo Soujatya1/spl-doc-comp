@@ -719,21 +719,18 @@ def main():
             different_rows = []
             
             for idx, row in df.iterrows():
-                # Convert row to a dictionary explicitly to avoid dtype errors
-                row_dict = row.to_dict()
-    
-                norm_company = row_dict["CompanyLine"].lower().replace(" ", "")
-                norm_customer = row_dict["CustomerLine"].lower().replace(" ", "")
-    
+                norm_company = row["CompanyLine"].lower().replace(" ", "")
+                norm_customer = row["CustomerLine"].lower().replace(" ", "")
+                
                 if norm_company == norm_customer:
-                    same_rows.append({**row_dict, "Comparison": "SAME"})
+                    same_rows.append({**row, "Comparison": "SAME"})
                 elif norm_company in norm_customer:
-                    same_rows.append({**row_dict, "Comparison": "SAME"})
+                    same_rows.append({**row, "Comparison": "SAME"})
                 elif norm_customer == "":
-                    same_rows.append({**row_dict, "Comparison": "DIFFERENT", 
+                    same_rows.append({**row, "Comparison": "DIFFERENT", 
                                      "Difference": "Could not find similar line in customer document"})
                 else:
-                    different_rows.append(row_dict)
+                    different_rows.append(row)
             
             df_same = pd.DataFrame(same_rows)
             df_different = pd.DataFrame(different_rows)
@@ -742,7 +739,7 @@ def main():
             
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
-                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=20)
+                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
             else:
                 df_diff_compared = df_different.copy()
                 
@@ -830,30 +827,28 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                excel_buffer = io.BytesIO()
-                filtered_df.to_excel(excel_buffer, index=False)
-                excel_buffer.seek(0)
-    
-                st.download_button(
-                    label="Download Raw Results",
-                    data=excel_buffer,
-                    file_name="document_comparison_raw.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="raw_download"  # Add a unique key
-                )
-
+                excel_path = os.path.join(temp_dir, "comparison_results.xlsx")
+                filtered_df.to_excel(excel_path, index=False)
+                
+                with open(excel_path, "rb") as f:
+                    st.download_button(
+                        label="Download Raw Results",
+                        data=f,
+                        file_name="document_comparison_raw.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            
             with col2:
-                formatted_buffer = io.BytesIO()
-                output_df.to_excel(formatted_buffer, index=False)
-                formatted_buffer.seek(0)
-    
-                st.download_button(
-                    label="Download Formatted Results",
-                    data=formatted_buffer,
-                    file_name="document_comparison_formatted.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="formatted_download"  # Add a unique key
-                )
+                formatted_path = os.path.join(temp_dir, "formatted_results.xlsx")
+                output_df.to_excel(formatted_path, index=False)
+                
+                with open(formatted_path, "rb") as f:
+                    st.download_button(
+                        label="Download Formatted Results",
+                        data=f,
+                        file_name="document_comparison_formatted.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
 if __name__ == "__main__":
     main()
