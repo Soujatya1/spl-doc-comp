@@ -167,7 +167,7 @@ def store_sections_in_faiss(docx_path, checklist_df):
             doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
             sections.append(doc_obj)
     
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
     faiss_index = FAISS.from_documents(sections, embedding_model)
     faiss_index.documents = sections
     progress_bar.empty()
