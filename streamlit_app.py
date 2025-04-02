@@ -1,494 +1,847 @@
+import time
 import streamlit as st
-import requests
-import os
+import pandas as pd
 import re
-import faiss
-import numpy as np
+import unicodedata
+import os
+import pickle
 import tempfile
-import urllib.parse
-from bs4 import BeautifulSoup
-from typing import List, Dict, Tuple, Any
-from sentence_transformers import SentenceTransformer
+from docx import Document
+from docx.document import Document as _Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.docstore.document import Document as LangchainDocument
+from difflib import SequenceMatcher
+from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-from langchain.embeddings.base import Embeddings
-from langchain.vectorstores import FAISS as LangchainFAISS
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
-from langchain.retrievers import ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain_openai import ChatOpenAI
+import tiktoken
+import json
 
-st.set_page_config(page_title="Web Intelligence BOT", layout="wide")
+# Configure page settings
+st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
-# Same website list as before
-WEBSITES = ["https://irdai.gov.in/rules",
-            "https://irdai.gov.in/consolidated-gazette-notified-regulations",
-            # ... rest of your websites
-]
+# Initialize session state for key variables
+if 'comparison_completed' not in st.session_state:
+    st.session_state.comparison_completed = False
+if 'company_faiss' not in st.session_state:
+    st.session_state.company_faiss = None
+if 'customer_faiss' not in st.session_state:
+    st.session_state.customer_faiss = None
+if 'final_df' not in st.session_state:
+    st.session_state.final_df = None
+if 'output_df' not in st.session_state:
+    st.session_state.output_df = None
+if 'processing_step' not in st.session_state:
+    st.session_state.processing_step = None
+if 'temp_dir' not in st.session_state:
+    st.session_state.temp_dir = tempfile.mkdtemp()
 
-CACHE_DIR = ".web_cache"
-os.makedirs(CACHE_DIR, exist_ok=True)
+temp_dir = st.session_state.temp_dir
 
-class SentenceTransformerEmbeddings(Embeddings):
-    def __init__(self, model_name="all-mpnet-base-v2"):  # Using a stronger embedding model
-        self.model = SentenceTransformer(model_name)
-        
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        embeddings = self.model.encode(texts)
-        return embeddings.tolist()
-    
-    def embed_query(self, text: str) -> List[float]:
-        embedding = self.model.encode([text])[0]
-        return embedding.tolist()
+def preprocess_text(text):
+    """Cleans text: removes text in < > brackets, extra spaces, normalizes, lowercases, and removes punctuation (except periods)."""
+    if not text:
+        return ""
+    text = re.sub(r"<.*?>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = text.lower()
+    text = re.sub(r"[^\w\s.]", "", text)
+    return text
 
-def fetch_website_content(url: str) -> Tuple[str, List[Dict]]:
-    """Fetch content from a website with improved extraction."""
-    
-    cache_file = os.path.join(CACHE_DIR, urllib.parse.quote_plus(url))
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r', encoding='utf-8') as f:
-            content = f.read()
+def count_tokens(text, encoding_name="cl100k_base"):
+    encoding = tiktoken.get_encoding(encoding_name)
+    return len(encoding.encode(text))
+
+def truncate_text(text, max_tokens=100):
+    encoding = tiktoken.get_encoding("cl100k_base")
+    tokens = encoding.encode(text)
+    return encoding.decode(tokens[:max_tokens])
+
+def iter_block_items(parent):
+    if isinstance(parent, _Document):
+        parent_elm = parent.element.body
     else:
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=10)
-            content = response.text
-            
-            # Cache the content
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                f.write(content)
-        except Exception as e:
-            return f"Error fetching {url}: {str(e)}", []
-    
-    soup = BeautifulSoup(content, 'html.parser')
-    
-    # Remove non-content elements
-    for element in soup(['script', 'style', 'nav', 'footer', 'header']):
-        element.extract()
-    
-    # Extract main content areas more intelligently
-    main_content = ""
-    main_elements = soup.select('main, article, .content, #content, .main, #main')
-    if main_elements:
-        for element in main_elements:
-            main_content += element.get_text(separator="\n") + "\n\n"
-    else:
-        # Fallback to body content
-        main_content = soup.body.get_text(separator="\n") if soup.body else ""
-    
-    table_data = extract_table_data(soup, url)
-    
-    # Preserve paragraph structure better
-    paragraphs = re.split(r'\n\s*\n', main_content)
-    cleaned_paragraphs = [re.sub(r'\s+', ' ', p.strip()) for p in paragraphs if p.strip()]
-    text = "\n\n".join(cleaned_paragraphs)
-    
-    # Add source URL as context
-    combined_text = f"Source: {url}\n\n{text}\n\n{table_data}"
-    
-    pdf_links = extract_pdf_links(soup, url)
-    
-    return combined_text, pdf_links
+        parent_elm = parent._element
+    for child in parent_elm.iterchildren():
+        if child.tag.endswith("p"):
+            yield Paragraph(child, parent)
+        elif child.tag.endswith("tbl"):
+            yield Table(child, parent)
 
-def extract_table_data(soup, base_url):
-    """Extract tabular data with improved structure preservation."""
-    table_data = ""
-    
-    tables = soup.find_all('table')
-    
-    for i, table in enumerate(tables):
-        # Add table identifier to help maintain context
-        table_data += f"\nTable {i+1} from {base_url}:\n"
-        
-        # Extract headers
-        headers = [th.get_text().strip() for th in table.find_all('th')]
-        if headers:
-            table_data += " | ".join(headers) + "\n"
-            table_data += "-" * (sum(len(h) for h in headers) + 3 * (len(headers) - 1)) + "\n"
-        
-        # Extract rows with better formatting
-        for row in table.find_all('tr')[1:] if headers else table.find_all('tr'):
-            cells = [cell.get_text().strip() for cell in row.find_all(['td', 'th'])]
-            if cells:
-                table_data += " | ".join(cells) + "\n"
-        
-        table_data += "\n"
-        
-        # Handle IRDAI specific tables (keeping your logic here)
-        if any(header in " ".join(headers) for header in ["Archive", "Description", "Last Updated", "Documents"]):
-            table_data += "IRDAI Acts Information:\n"
-            
-            for row in table.find_all('tr')[1:]:
-                # Your existing IRDAI table processing...
-                cells = row.find_all(['td', 'th'])
-                if len(cells) >= 4:
-                    archive_status = cells[0].get_text().strip()
-                    description = cells[1].get_text().strip()
-                    last_updated = cells[2].get_text().strip()
-                    
-                    doc_cell = cells[-1]
-                    pdf_links = []
-                    for link in doc_cell.find_all('a'):
-                        if link.has_attr('href') and link['href'].lower().endswith('.pdf'):
-                            pdf_url = link['href']
-                            if not pdf_url.startswith(('http://', 'https://')):
-                                pdf_url = urllib.parse.urljoin(base_url, pdf_url)
-                            
-                            file_info = link.get_text().strip()
-                            pdf_links.append(f"{file_info} ({pdf_url})")
-                    
-                    row_data = f"Act: {description}\n"
-                    row_data += f"Status: {archive_status}\n"
-                    row_data += f"Last Updated: {last_updated}\n"
-                    
-                    if pdf_links:
-                        row_data += "Documents: " + ", ".join(pdf_links) + "\n"
-                    
-                    table_data += row_data + "\n"
-            
-            # Find latest acts (keeping your logic)
-            table_data += "\nLatest Acts Information:\n"
-            
-            latest_dates = []
-            for row in table.find_all('tr')[1:]:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) >= 3:
-                    date_text = cells[2].get_text().strip()
-                    if re.search(r'\d{2}-\d{2}-\d{4}', date_text):
-                        latest_dates.append((date_text, cells[1].get_text().strip()))
-            
-            if latest_dates:
-                latest_dates.sort(reverse=True)
-                latest_date, latest_act = latest_dates[0]
-                table_data += f"The latest updated Act under IRDAI is {latest_act} with the last updated date as {latest_date}\n"
-    
-    return table_data
+def extract_text_by_sections(docx_path):
+    extracted_data = []
+    doc = Document(docx_path)
+    current_section = "unknown_section"
+    order_counter = 0
 
-# extract_pdf_links function remains mostly the same
-def extract_pdf_links(soup, base_url):
-    """Extract PDF links with improved metadata extraction."""
-    # Same implementation as your original function
-    pdf_links = []
-    
-    # Your existing PDF extraction code...
-    
-    return pdf_links
+    for block in iter_block_items(doc):
+        if block.__class__.__name__ == "Paragraph":
+            para_text = preprocess_text(block.text)
+            if block.style and "heading" in block.style.name.lower() and para_text:
+                current_section = para_text
+            elif para_text:
+                extracted_data.append({
+                    "section": current_section,
+                    "text": para_text,
+                    "type": "paragraph",
+                    "order": order_counter
+                })
+                order_counter += 1
+        elif block.__class__.__name__ == "Table":
+            table_data = []
+            for row in block.rows:
+                row_cells = [preprocess_text(cell.text.strip()) for cell in row.cells]
+                table_data.append(" | ".join(row_cells))
+            table_text = "\n".join(table_data)
+            if table_text:
+                extracted_data.append({
+                    "section": current_section,
+                    "text": f"[TABLE] {table_text}",
+                    "type": "table",
+                    "order": order_counter
+                })
+                order_counter += 1
+    return extracted_data
 
-def initialize_rag_system():
-    """Initialize the RAG system with improved document processing."""
-    st.session_state.status = "Initializing RAG system..."
-    
-    all_docs = []
-    all_pdf_links = []
-    
+def find_closest_match(target, text_list, threshold=0.65):
+    target = target.lower()
+    best_match = None
+    best_score = threshold
+    for text in text_list:
+        lower_text = text.lower()
+        if target in lower_text:
+            return text
+        score = SequenceMatcher(None, target, lower_text).ratio()
+        if score > best_score:
+            best_score = score
+            best_match = text
+    return best_match
+
+def extract_section(extracted_data, start_marker, end_marker):
+    if not extracted_data:
+        return ""
+    sorted_data = sorted(extracted_data, key=lambda d: d.get("order", 0))
+    combined_text = "\n".join([item["text"] for item in sorted_data])
+    lines = combined_text.split("\n")
+    best_start = find_closest_match(start_marker, lines)
+    best_end = find_closest_match(end_marker, lines)
+
+    if not best_start or not best_end:
+        st.warning(f"Could not find {start_marker} or {end_marker}")
+        return combined_text
+    try:
+        start_idx = lines.index(best_start)
+        end_idx = lines.index(best_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        return "\n".join(lines[start_idx:end_idx+1])
+    except ValueError:
+        return combined_text
+
+@st.cache_data
+def store_sections_in_faiss(docx_path, checklist_df):
+    """Store document sections in FAISS with caching"""
     progress_bar = st.progress(0)
-    for i, website in enumerate(WEBSITES):
-        st.session_state.status = f"Processing {website}..."
-        content, pdf_links = fetch_website_content(website)
-        
-        # Using a better chunking strategy with larger chunks and more overlap
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,  # Larger chunks for better context
-            chunk_overlap=200,  # More overlap to preserve context across chunks
-            separators=["\n\n", "\n", ". ", " ", ""],  # Better splitting at natural boundaries
-            keep_separator=True
-        )
-        
-        if content and not content.startswith("Error"):
-            # Add the source URL and publish date as metadata for better context
-            source_metadata = {"source": website, "domain": urllib.parse.urlparse(website).netloc}
+    extracted_data = extract_text_by_sections(docx_path)
+    sections = []
+    
+    total_rows = len(checklist_df)
+    for idx, row in checklist_df.iterrows():
+        progress_bar.progress((idx + 1) / total_rows)
             
-            # Extract and add date information if available
-            date_match = re.search(r'(\d{2}[/-]\d{2}[/-]\d{4})', content[:1000])
-            if date_match:
-                source_metadata["date"] = date_match.group(1)
-            
-            # Create documents with rich metadata
-            chunks = text_splitter.split_text(content)
-            for i, chunk in enumerate(chunks):
-                all_docs.append(Document(
-                    page_content=chunk,
-                    metadata={
-                        **source_metadata,
-                        "chunk_id": i,
-                        "total_chunks": len(chunks)
-                    }
-                ))
-            all_pdf_links.extend(pdf_links)
+        section_name = row['PageName'].strip().lower()
+        start_marker = preprocess_text(row['StartMarker'])
+        end_marker = preprocess_text(row['EndMarker'])
+        section_text = extract_section(extracted_data, start_marker, end_marker)
+        if section_text:
+            metadata = {
+                "section": section_name,
+                "start": start_marker,
+                "end": end_marker,
+                "source": os.path.basename(docx_path)
+            }
+            doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
+            sections.append(doc_obj)
+    
+    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    faiss_index = FAISS.from_documents(sections, embedding_model)
+    faiss_index.documents = sections
+    progress_bar.empty()
+    return faiss_index
+
+def split_text_into_lines(text):
+    return re.split(r'\n|\||\. ', text)
+
+def find_best_line_match(target, lines):
+    target = target.lower().strip()
+
+    if len(target) < 10:
+        custom_threshold = 90
+    elif len(target) < 50:
+        custom_threshold = 75
+    else:
+        custom_threshold = 65
+
+    best = process.extractOne(
+        query=target,
+        choices=lines,
+        scorer=fuzz.ratio,
+        score_cutoff=custom_threshold
+    )
+    if best:
+        return best[0]
+    else:
+        return ""
+
+def extract_content_within_markers(text, start_marker, end_marker):
+    lines = text.split("\n")
+    best_start = find_closest_match(start_marker, lines)
+    best_end = find_closest_match(end_marker, lines)
+    if not best_start or not best_end:
+        st.warning("Could not find both markers exactly; returning full text.")
+        return text
+    try:
+        start_idx = lines.index(best_start)
+        end_idx = lines.index(best_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        return "\n".join(lines[start_idx:end_idx + 1])
+    except ValueError:
+        st.warning("Error finding marker indices; returning full text.")
+        return text
+
+def retrieve_section(page_name, start_marker, end_marker, faiss_index):
+    """Retrieves all documents from the FAISS index whose metadata contains the specified criteria."""
+    matching_sections = []
+    for doc in faiss_index.documents:
+        metadata = doc.metadata
+        if (page_name.lower() in metadata.get("section", "").lower() and
+                start_marker.lower() in metadata.get("start", "").lower() and
+                end_marker.lower() in metadata.get("end", "").lower()):
+            extracted_text = extract_content_within_markers(doc.page_content, start_marker, end_marker)
+            matching_sections.append({
+                "text": extracted_text,
+                "metadata": metadata
+            })
+    return matching_sections
+
+def process_batch(df_batch, openai_api_key):
+    """Process a batch of rows with improved prompt construction and error handling."""
+    # Prepare the prompt with fixed truncation
+    prompt_lines = []
+    for idx, row in df_batch.iterrows():
+        # Aggressive truncation to save tokens
+        company_text = truncate_text(str(row['CompanyLine']), max_tokens=100)
+        customer_text = truncate_text(str(row['CustomerLine']), max_tokens=100)
         
-        progress_bar.progress((i + 1) / len(WEBSITES))
+        prompt_lines.append(f"Row {idx}:")
+        prompt_lines.append(f"Company: {company_text}")
+        prompt_lines.append(f"Customer: {customer_text}")
+        prompt_lines.append("---")
     
-    st.session_state.status = "Creating embeddings..."
-    embeddings = SentenceTransformerEmbeddings()
-    
-    st.session_state.status = "Building vector store..."
-    vector_store = LangchainFAISS.from_documents(all_docs, embeddings)
-    
-    st.session_state.vector_store = vector_store
-    st.session_state.pdf_links = all_pdf_links
-    st.session_state.status = "System initialized!"
-    st.session_state.initialized = True
-
-def initialize_llm():
-    """Initialize the language model with improved retrieval."""
-    groq_api_key = st.session_state.groq_api_key
-    os.environ["GROQ_API_KEY"] = groq_api_key
-    
-    llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="llama3-70b-8192",
-        temperature=0.1  # Lower temperature for more factual responses
+    prompt_text = "\n".join(prompt_lines)
+    prompt_text += (
+        "\n\nCompare the above rows line by line. "
+        "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
+        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Return ONLY the JSON."
     )
     
-    # Create a base retriever with similarity search and MMR combination
-    base_retriever = st.session_state.vector_store.as_retriever(
-        search_type="mmr",  # Using MMR for better diversity
-        search_kwargs={
-            "k": 10,  # Retrieve more documents initially
-            "fetch_k": 20,  # Consider more candidates
-            "lambda_mult": 0.7  # Balance relevance and diversity
-        }
+    total_tokens = count_tokens(prompt_text)
+    st.info(f"Batch Prompt Tokens: {total_tokens}")
+    
+    # If the prompt is still too large, split the batch
+    if total_tokens > 4000:
+        st.warning(f"Prompt too large ({total_tokens} tokens). Splitting batch.")
+        
+        # Split the batch in half and process each separately
+        half_size = len(df_batch) // 2
+        if half_size == 0:  # Can't split further
+            st.error("Cannot split batch further. Individual rows may be too large.")
+            # Try with extreme truncation for this batch
+            for idx, row in df_batch.iterrows():
+                df_batch.at[idx, 'CompanyLine'] = truncate_text(str(row['CompanyLine']), max_tokens=50)
+                df_batch.at[idx, 'CustomerLine'] = truncate_text(str(row['CustomerLine']), max_tokens=50)
+            return process_batch(df_batch, openai_api_key)
+        
+        # Process each half separately
+        first_half_results = process_batch(df_batch.iloc[:half_size], openai_api_key)
+        second_half_results = process_batch(df_batch.iloc[half_size:], openai_api_key)
+        
+        # Combine results
+        return first_half_results + second_half_results
+    
+    # If we're here, the prompt is within token limits
+    openai_llm = ChatOpenAI(
+        api_key=openai_api_key,
+        model_name="gpt-3.5-turbo",
+        max_tokens=1000
     )
     
-    # Add contextual compression to filter out irrelevant passages
-    compressor = LLMChainExtractor.from_llm(llm)
-    retriever = ContextualCompressionRetriever(
-        base_compressor=compressor,
-        base_retriever=base_retriever
-    )
+    with st.spinner("Processing text comparison with LLM..."):
+        try:
+            response = openai_llm.invoke([
+                {"role": "user", "content": prompt_text}
+            ]).content
+        except Exception as e:
+            st.error(f"LLM Processing Error: {e}")
+            return []
     
-    # Improved prompt template with specific guidance
-    template = """
-    You are an expert assistant specializing in insurance and regulatory information for IRDAI (Insurance Regulatory and Development Authority of India) and UIDAI (Unique Identification Authority of India). 
-    
-    Answer the question based ONLY on the provided context. Be direct, accurate, and provide specific details from the context.
-    
-    Guidelines:
-    1. When mentioning regulations or acts, always include their full names, dates, and reference numbers if available.
-    2. If asked about the "latest" regulations, focus on the most recently updated ones based on dates in the context.
-    3. Always cite the source of your information by mentioning the specific website or document.
-    4. If the information is not available in the context, clearly state that you cannot provide an answer based on the available information.
-    5. Do not make up information or guess if it's not in the context.
-    6. If there are PDF documents that might contain relevant information, suggest them as additional resources.
-    
-    Context:
-    {context}
-    
-    Question: {question}
-    
-    Answer:
-    """
-    
-    prompt = PromptTemplate(
-        template=template,
-        input_variables=["context", "question"]
-    )
-    
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True,
-        chain_type_kwargs={"prompt": prompt}
-    )
-    
-    st.session_state.qa_chain = qa_chain
-
-def find_relevant_pdfs(query: str, pdf_links: List[Dict], top_k: int = 5):
-    """Find relevant PDFs with improved semantic matching."""
-    if not pdf_links:
+    if not response.strip():
+        st.warning("Empty response from LLM.")
         return []
     
-    # Use same model as main embeddings for consistency
-    model = SentenceTransformer("all-mpnet-base-v2")
-    
-    # Enhanced query expansion for better matching
-    expanded_query = f"{query} insurance regulation policy document IRDAI UIDAI"
-    query_embedding = model.encode(expanded_query)
-    
-    # Build richer context for each PDF
-    pdf_texts = []
-    for pdf in pdf_links:
-        # Create a more comprehensive representation
-        context_text = f"Title: {pdf['text']} "
-        context_text += f"Context: {pdf['context']} "
+    try:
+        response_text = response.strip()
         
-        if 'metadata' in pdf and pdf['metadata']:
-            for key, value in pdf['metadata'].items():
-                context_text += f"{key}: {value} "
-        
-        # Add the URL as a feature (domain name can be informative)
-        domain = urllib.parse.urlparse(pdf['url']).netloc
-        context_text += f"Source: {domain}"
-        
-        pdf_texts.append(context_text)
-    
-    pdf_embeddings = model.encode(pdf_texts)
-    
-    # Create FAISS index with cosine similarity (L2 normalized vectors)
-    dimension = pdf_embeddings.shape[1]
-    pdf_embeddings_normalized = pdf_embeddings / np.linalg.norm(pdf_embeddings, axis=1, keepdims=True)
-    query_embedding_normalized = query_embedding / np.linalg.norm(query_embedding)
-    
-    index = faiss.IndexFlatIP(dimension)  # Inner product for cosine similarity with normalized vectors
-    index.add(pdf_embeddings_normalized)
-    
-    distances, indices = index.search(np.array([query_embedding_normalized]), top_k)
-    
-    # Filter by relevance threshold
-    relevance_threshold = 0.5  # Adjust as needed
-    results = []
-    
-    for i, idx in enumerate(indices[0]):
-        similarity = distances[0][i]
-        if similarity > relevance_threshold and idx < len(pdf_links):
-            # Add similarity score to the result
-            result = pdf_links[idx].copy()
-            result['similarity'] = float(similarity)
-            results.append(result)
-    
-    return results
-
-# UI improvements
-st.title("Insurance Regulatory Intelligence Bot")
-
-with st.sidebar:
-    st.header("Configuration")
-    groq_api_key = st.text_input("Enter Groq API Key", type="password")
-    
-    if groq_api_key:
-        st.session_state.groq_api_key = groq_api_key
-        
-        if st.button("Initialize System") or ('initialized' not in st.session_state):
-            st.session_state.initialized = False
-            initialize_rag_system()
-            if st.session_state.initialized:
-                initialize_llm()
-    
-    # Add advanced settings
-    with st.expander("Advanced Settings"):
-        if 'initialized' in st.session_state and st.session_state.initialized:
-            st.slider("Number of documents to retrieve", 3, 15, 10, key="k_documents")
-            st.slider("Relevance threshold (0-100)", 0, 100, 50, key="relevance_threshold")
-
-if 'status' in st.session_state:
-    st.info(st.session_state.status)
-
-if 'initialized' in st.session_state and st.session_state.initialized:
-    st.subheader("Ask a question about IRDAI or UIDAI regulations")
-    
-    # Suggested questions for better user experience
-    st.caption("Example questions:")
-    example_questions = [
-        "What are the latest IRDAI regulations?",
-        "What are the KYC requirements for insurance?",
-        "What is the process for filing a complaint against an insurance company?",
-        "What are the penalties for non-compliance with IRDAI regulations?",
-        "What are the latest updates to the Aadhaar Act?"
-    ]
-    for q in example_questions:
-        if st.button(q, key=f"btn_{q}", use_container_width=True):
-            st.session_state.query = q
-    
-    # Query input with history
-    if 'query' not in st.session_state:
-        st.session_state.query = ""
-    
-    query = st.text_input("What would you like to know?", value=st.session_state.query)
-    
-    if query and st.button("Search", use_container_width=True):
-        st.session_state.query = query  # Save query for context
-        
-        with st.spinner("Searching for information..."):
-            # Update retrieval parameters from UI if available
-            if 'k_documents' in st.session_state:
-                st.session_state.qa_chain.retriever.search_kwargs["k"] = st.session_state.k_documents
-            
-            if 'relevance_threshold' in st.session_state:
-                threshold = st.session_state.relevance_threshold / 100
-                # Apply threshold in the find_relevant_pdfs function
-            
-            result = st.session_state.qa_chain({"query": query})
-            answer = result["result"]
-            source_docs = result["source_documents"]
-            
-            # Find relevant PDFs with updated threshold
-            relevant_pdfs = find_relevant_pdfs(
-                query, 
-                st.session_state.pdf_links, 
-                top_k=5
-            )
-            
-            st.subheader("Answer")
-            st.markdown(answer)
-            
-            # Source citation with better formatting
-            with st.expander("Sources"):
-                sources = {}
-                for doc in source_docs:
-                    source_url = doc.metadata["source"]
-                    domain = urllib.parse.urlparse(source_url).netloc
-                    
-                    if source_url not in sources:
-                        sources[source_url] = {
-                            "domain": domain,
-                            "chunks": []
-                        }
-                    
-                    # Add a snippet from the document with highlighting
-                    snippet = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-                    sources[source_url]["chunks"].append(snippet)
-                
-                # Display sources with snippets
-                for source_url, info in sources.items():
-                    st.markdown(f"#### [{info['domain']}]({source_url})")
-                    for i, chunk in enumerate(info["chunks"][:3]):  # Limit to 3 snippets per source
-                        st.markdown(f"**Excerpt {i+1}:**")
-                        st.text(chunk)
-                    
-                    if len(info["chunks"]) > 3:
-                        st.caption(f"...and {len(info['chunks']) - 3} more relevant sections")
-            
-            # PDF recommendations with clear relevance indicators
-            if relevant_pdfs:
-                st.subheader("Relevant PDF Documents")
-                
-                for pdf in sorted(relevant_pdfs, key=lambda x: x.get('similarity', 0), reverse=True):
-                    col1, col2 = st.columns([3, 1])
-                    
-                    with col1:
-                        st.markdown(f"[{pdf['text']}]({pdf['url']})")
-                        
-                        metadata_text = ""
-                        if 'metadata' in pdf and pdf['metadata']:
-                            for key, value in pdf['metadata'].items():
-                                if value:
-                                    metadata_text += f"{key}: {value}, "
-                            metadata_text = metadata_text.rstrip(", ")
-                        
-                        if metadata_text:
-                            st.caption(f"{metadata_text}")
-                        else:
-                            st.caption(f"Context: {pdf['context'][:100]}...")
-                    
-                    with col2:
-                        # Show relevance score as a progress bar
-                        if 'similarity' in pdf:
-                            relevance = int(pdf['similarity'] * 100)
-                            st.caption("Relevance:")
-                            st.progress(pdf['similarity'])
-                            st.caption(f"{relevance}%")
+        try:
+            comparisons = json.loads(response_text)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+                comparisons = json.loads(json_text)
             else:
-                st.info("No relevant PDF documents found")
-else:
-    if 'initialized' not in st.session_state:
-        st.info("Please enter your Groq API key and initialize the system.")
-    elif not st.session_state.initialized:
-        st.info("System initialization in progress...")
+                import ast
+                try:
+                    comparisons = ast.literal_eval(response_text)
+                except:
+                    st.error("Could not parse response as JSON or Python literal")
+                    comparisons = []
+    
+    except Exception as e:
+        st.error(f"Comprehensive JSON Parsing Error: {e}")
+        st.code(response)
+        comparisons = []
+    
+    return comparisons
 
-with st.expander("Indexed Websites"):
-    for website in WEBSITES:
-        st.write(f"- {website}")
+def chunk_dataframe_into_batches(df, batch_size=50):
+    """Split a dataframe into chunks of specified batch size."""
+    return [df.iloc[i:i+batch_size] for i in range(0, len(df), batch_size)]
+
+def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
+    """Split a dataframe into chunks based on token count."""
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+    
+    for _, row in df.iterrows():
+        row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
+        row_tokens = count_tokens(row_text)
+        
+        # If this single row exceeds max tokens, truncate it
+        if row_tokens > max_tokens:
+            row = row.copy()  # Create a copy to avoid modifying the original
+            row['CompanyLine'] = truncate_text(row['CompanyLine'], max_tokens // 2)
+            row['CustomerLine'] = truncate_text(row['CustomerLine'], max_tokens // 2)
+            row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
+            row_tokens = count_tokens(row_text)
+        
+        if current_tokens + row_tokens > max_tokens and current_chunk:
+            chunks.append(pd.DataFrame(current_chunk))
+            current_chunk = []
+            current_tokens = 0
+        
+        current_chunk.append(row)
+        current_tokens += row_tokens
+    
+    if current_chunk:
+        chunks.append(pd.DataFrame(current_chunk))
+    
+    return chunks
+
+@st.cache_data
+def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
+    """Compare dataframe contents with caching to prevent re-processing"""
+    # Make a deep copy to avoid modifying the original
+    df = _df.copy()
+    
+    if df.empty:
+        return df
+    
+    # Limit to 100 rows for testing/demo (optional)
+    df = df.head(100)
+    
+    progress_bar = st.progress(0)
+    
+    # Split the dataframe into fixed-size batches
+    df_batches = chunk_dataframe_into_batches(df, batch_size=batch_size)
+    
+    all_comparisons = []
+    max_retries = 3
+    
+    for batch_idx, batch in enumerate(df_batches):
+        st.text(f"Processing batch {batch_idx+1} of {len(df_batches)} ({len(batch)} rows)")
+        
+        # Initialize a new batch_comparisons list
+        batch_comparisons = []
+        
+        # Further chunk each batch based on token count
+        token_chunks = chunk_dataframe_with_token_reduction(batch, max_tokens=3000)
+        st.info(f"Split into {len(token_chunks)} token-based chunks")
+        
+        for token_chunk_idx, token_chunk in enumerate(token_chunks):
+            for attempt in range(max_retries):
+                try:
+                    if token_chunk_idx > 0 or batch_idx > 0:
+                        delay_time = max(5, min(20, rate_limit_delay // len(token_chunks)))
+                        st.info(f"Waiting {delay_time} seconds to avoid rate limiting...")
+                        time.sleep(delay_time)
+                    
+                    st.text(f"Processing token chunk {token_chunk_idx+1} of {len(token_chunks)} ({len(token_chunk)} rows)")
+                    chunk_comparisons = process_batch(token_chunk, openai_api_key)
+                    batch_comparisons.extend(chunk_comparisons)
+                    break
+                    
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        st.warning(f"Attempt {attempt + 1} failed for chunk {token_chunk_idx}. Retrying... Error: {e}")
+                        time.sleep(rate_limit_delay)
+                    else:
+                        st.error(f"Failed after {max_retries} attempts for chunk {token_chunk_idx}. Error: {e}")
+        
+        all_comparisons.extend(batch_comparisons)
+        progress_bar.progress((batch_idx + 1) / len(df_batches))
+    
+    progress_bar.empty()
+
+    # Map the comparison results back to the dataframe
+    df['Comparison'] = df.index.map(
+        lambda idx: next((item['comparison'] for item in all_comparisons if str(item.get('row', '')) == str(idx)), "N/A"))
+    df['Difference'] = df.index.map(
+        lambda idx: next((item.get('difference', '') for item in all_comparisons if str(item.get('row', '')) == str(idx)), ""))
+    
+    return df
+
+def create_single_format_prompt(section_differences):
+    """Create a single format prompt for given section differences with summarization."""
+    prompt = (
+        "I'm analyzing differences between company and customer documents. "
+        "For each section with differences, I need you to summarize and categorize them into the following format:\n\n"
+        "1. Samples affected - a list of sample IDs or 'All Samples' which are the Customer document name (without extension like .docx) if the issue affects all samples\n"
+        "2. Observation Category - categorize the issue into one of these categories:\n"
+        "   - 'Mismatch of content between Filed Copy and customer copy'\n"
+        "   - 'Available in Filed Copy but missing in Customer Copy'\n"
+        "3. Page - the section name where the issue was found which should be amongst the below only:\n"
+        "   - 'Forwarding letter'\n"
+        "   - 'PREAMBLE'\n"
+        "   - 'Schedule'\n"
+        "   - 'Terms and Conditions'\n"
+        "   - 'Ombudsman Page'\n"
+        "   - 'Annexure 1'\n"
+        "   - 'Annexure AA'\n"
+        "4. Sub-category of Observation - a concise description that summarizes all the differences for this page intelligently understanding what the differences are about\n\n"
+        "IMPORTANT: Summarize all the page-wise differences into at most TWO rows in your response. For the Observation Category, is should contain summarized information of what information is different in an intelligent manner"
+        "Group similar differences together and provide a consolidated summary rather than listing each individual difference. Please collate all the information correctly and align as per\n\n"
+        "Here are the differences found per section:\n\n"
+    )
+    
+    for section, differences in section_differences.items():
+        prompt += f"Section: {section}\n"
+        prompt += "Differences:\n"
+        for diff in differences:
+            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 75)}\n"
+            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 75)}\n"
+            prompt += f"- Difference: {diff['Difference']}\n\n"
+    
+    prompt += (
+        "Please format your response as a JSON array where each object has these keys:\n"
+        "- 'samples_affected': String (e.g., 'All Samples' or specific IDs)\n"
+        "- 'observation_category': String (the category of the issue)\n"
+        "- 'page': String (the section name)\n"
+        "- 'sub_category': String (a summarized description of all issues found in this page, consolidating similar differences)\n\n"
+        "Remember to provide AT MOST 2 rows per page, summarizing multiple differences into concise categories.\n\n"
+        "Return ONLY the JSON with no additional text."
+    )
+    
+    return prompt
+
+def format_output_prompt(section_differences):
+    """Create prompts for the second LLM call to format the differences."""
+    prompts = []
+    current_sections = {}
+    current_diff_count = 0
+    max_diff_per_prompt = 15
+    
+    for section, differences in section_differences.items():
+        if current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
+            # Create a prompt from current accumulated sections
+            prompts.append(create_single_format_prompt(current_sections))
+            current_sections = {}
+            current_diff_count = 0
+        
+        # If a single section has too many differences, split it
+        if len(differences) > max_diff_per_prompt:
+            for i in range(0, len(differences), max_diff_per_prompt):
+                chunk = differences[i:i+max_diff_per_prompt]
+                prompts.append(create_single_format_prompt({section: chunk}))
+        else:
+            current_sections[section] = differences
+            current_diff_count += len(differences)
+    
+    # Add any remaining sections
+    if current_diff_count > 0:
+        prompts.append(create_single_format_prompt(current_sections))
+    
+    return prompts
+
+@st.cache_data
+def generate_formatted_output(_section_differences, openai_api_key):
+    """Generate formatted output from section differences with caching and summarization"""
+    # Make a deep copy to avoid modifying the original
+    section_differences = _section_differences.copy()
+    
+    prompts = format_output_prompt(section_differences)
+    all_formatted_outputs = []
+    
+    for i, prompt in enumerate(prompts):
+        st.text(f"Processing format chunk {i+1} of {len(prompts)}")
+        
+        openai_llm = ChatOpenAI(
+            api_key=openai_api_key,
+            model_name="gpt-3.5-turbo-16k"  # Using a larger context model
+        )
+        
+        with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
+            response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
+        
+        if not response.strip():
+            st.warning(f"Empty response from format LLM in chunk {i+1}.")
+            continue
+        
+        try:
+            response_text = response.strip()
+            start_idx = response_text.find('[')
+            end_idx = response_text.rfind(']') + 1
+            if start_idx >= 0 and end_idx > 0:
+                json_text = response_text[start_idx:end_idx]
+                formatted_output = json.loads(json_text)
+            else:
+                formatted_output = json.loads(response_text)
+            
+            # Post-process to ensure we have at most 2 rows per page
+            page_summaries = {}
+            for item in formatted_output:
+                page = item.get('page', '')
+                if page not in page_summaries:
+                    page_summaries[page] = []
+                if len(page_summaries[page]) < 2:  # Limit to at most 2 entries per page
+                    page_summaries[page].append(item)
+            
+            # Flatten the dictionary back to a list
+            consolidated_output = []
+            for page_items in page_summaries.values():
+                consolidated_output.extend(page_items)
+                
+            all_formatted_outputs.extend(consolidated_output)
+            
+            # Add delay between chunks if needed
+            if i < len(prompts) - 1:
+                time.sleep(10)
+                
+        except Exception as e:
+            st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
+            st.code(response)
+    
+    # Final post-processing to ensure we have at most 2 rows per page
+    page_to_items = {}
+    for item in all_formatted_outputs:
+        page = item.get('page', '')
+        if page not in page_to_items:
+            page_to_items[page] = []
+        if len(page_to_items[page]) < 2:  # Limit to at most 2 entries per page
+            page_to_items[page].append(item)
+    
+    final_output = []
+    for page_items in page_to_items.values():
+        final_output.extend(page_items)
+    
+    return final_output
+
+def save_uploaded_file(uploaded_file):
+    if uploaded_file is not None:
+        file_path = os.path.join(temp_dir, uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        return file_path
+    return None
+
+def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
+    """Run the comparison process in steps, with state tracking"""
+    progress_container = st.empty()
+    
+    try:
+        # Step 1: Load checklist
+        with progress_container.container():
+            st.subheader("Step 1: Loading Checklist")
+            checklist_df = pd.read_excel(checklist_path)
+            st.session_state.processing_step = "load_checklist"
+            st.success("✅ Checklist loaded successfully")
+
+        # Step 2: Process company document
+        with progress_container.container():
+            st.subheader("Step 2: Processing Company Document")
+            st.text("Storing company sections...")
+            st.session_state.company_faiss = store_sections_in_faiss(company_path, checklist_df)
+            st.session_state.processing_step = "company_faiss"
+            st.success("✅ Company document processed successfully")
+
+        # Step 3: Process customer document
+        with progress_container.container():
+            st.subheader("Step 3: Processing Customer Document")
+            st.text("Storing customer sections...")
+            st.session_state.customer_faiss = store_sections_in_faiss(customer_path, checklist_df)
+            st.session_state.processing_step = "customer_faiss"
+            st.success("✅ Customer document processed successfully")
+
+        # Step 4: Compare sections
+        with progress_container.container():
+            st.subheader("Step 4: Comparing Sections")
+            final_rows = []
+            
+            for idx, row in checklist_df.iterrows():
+                section_name = row['PageName'].strip().lower()
+                start_marker = preprocess_text(row['StartMarker'])
+                end_marker = preprocess_text(row['EndMarker'])
+                
+                st.text(f"Processing section: {section_name}")
+                
+                company_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.company_faiss)
+                customer_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.customer_faiss)
+                
+                if not company_section or not customer_section:
+                    st.warning(f"Could not retrieve sections for {section_name}")
+                    continue
+                
+                company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
+                               line.strip() and "[TABLE]" not in line]
+                customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
+                                line.strip() and "[TABLE]" not in line]
+                
+                for comp_line in company_lines:
+                    best_cust_line = find_best_line_match(comp_line, customer_lines)
+                    final_rows.append({
+                        "Section": section_name,
+                        "CompanyLine": comp_line,
+                        "CustomerLine": best_cust_line
+                    })
+            
+            df = pd.DataFrame(final_rows).drop_duplicates()
+            df["order"] = df.index
+            st.session_state.processing_step = "initial_comparison"
+            st.success("✅ Initial comparison completed")
+
+        # Step 5: Filter and analyze differences
+        with progress_container.container():
+            st.subheader("Step 5: Filtering Similar and Different Rows")
+            
+            same_rows = []
+            different_rows = []
+            
+            for idx, row in df.iterrows():
+                norm_company = row["CompanyLine"].lower().replace(" ", "")
+                norm_customer = row["CustomerLine"].lower().replace(" ", "")
+                
+                if norm_company == norm_customer:
+                    same_rows.append({**row, "Comparison": "SAME"})
+                elif norm_company in norm_customer:
+                    same_rows.append({**row, "Comparison": "SAME"})
+                elif norm_customer == "":
+                    same_rows.append({**row, "Comparison": "DIFFERENT", 
+                                     "Difference": "Could not find similar line in customer document"})
+                else:
+                    different_rows.append(row)
+            
+            df_same = pd.DataFrame(same_rows) if same_rows else pd.DataFrame()
+            df_different = pd.DataFrame(different_rows) if different_rows else pd.DataFrame()
+            
+            st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
+            st.session_state.processing_step = "filtered_rows"
+            st.success("✅ Filtering completed")
+
+        # Step 6: Analyze differences with LLM
+        with progress_container.container():
+            st.subheader("Step 6: Analyzing Differences with LLM")
+            
+            if not df_different.empty:
+                st.text("Analyzing differences with LLM...")
+                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
+            else:
+                df_diff_compared = df_different.copy()
+            
+            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order") if not df_same.empty or not df_diff_compared.empty else pd.DataFrame()
+            if not df_final.empty:
+                df_final = df_final.drop(columns=["order"])
+            
+            st.session_state.final_df = df_final
+            st.session_state.processing_step = "difference_analysis"
+            st.success("✅ Difference analysis completed")
+
+        # Step 7: Format output
+        with progress_container.container():
+            st.subheader("Step 7: Generating Formatted Output")
+            
+            section_differences = {}
+            if not df_final.empty:
+                for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
+                    section = row["Section"]
+                    if section not in section_differences:
+                        section_differences[section] = []
+                    section_differences[section].append({
+                        "CompanyLine": row["CompanyLine"],
+                        "CustomerLine": row["CustomerLine"],
+                        "Difference": row["Difference"]
+                    })
+            
+            formatted_output = []
+            if section_differences:
+                st.text("Generating formatted output...")
+                formatted_output = generate_formatted_output(section_differences, openai_api_key)
+            
+            if formatted_output:
+                output_df = pd.DataFrame(formatted_output)
+                output_df.columns = [
+                    "Samples affected", 
+                    "Observation - Category", 
+                    "Page", 
+                    "Sub-category of Observation"
+                ]
+            else:
+                output_df = pd.DataFrame(columns=[
+                    "Samples affected", 
+                    "Observation - Category", 
+                    "Page", 
+                    "Sub-category of Observation"
+                ])
+            
+            st.session_state.output_df = output_df
+            st.session_state.comparison_completed = True
+            st.session_state.processing_step = "complete"
+            st.success("✅ Formatted output generated successfully")
+
+        progress_container.empty()
+        st.session_state.comparison_completed = True
+        return True
+        
+    except Exception as e:
+        progress_container.error(f"Error occurred during processing: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return False
+
+def display_results():
+    """Display the comparison results"""
+    st.header("Document Comparison Results")
+    
+    if st.session_state.comparison_completed:
+        # Add a button to start a new comparison
+        if st.button("Start New Comparison"):
+            st.session_state.comparison_completed = False
+            st.session_state.final_df = None
+            st.session_state.output_df = None
+            st.rerun()
+        
+        
+    if st.session_state.final_df is not None:
+        # Display metrics
+        df_final = st.session_state.final_df
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Lines", len(df_final))
+            st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
+        with col2:
+            st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
+            percentage_different = (len(df_final[df_final["Comparison"] == "DIFFERENT"]) / len(df_final) * 100) if len(df_final) > 0 else 0
+            st.metric("Difference Percentage", f"{percentage_different:.2f}%")
+        
+        # Display tabs for different views
+        tab1, tab2, tab3 = st.tabs(["All Comparisons", "Differences Only", "Formatted Output"])
+        
+        with tab1:
+            st.subheader("All Comparisons")
+            st.dataframe(df_final, use_container_width=True)
+        
+        with tab2:
+            st.subheader("Differences Only")
+            differences_df = df_final[df_final["Comparison"] == "DIFFERENT"].reset_index(drop=True)
+            st.dataframe(differences_df, use_container_width=True)
+        
+        with tab3:
+            st.subheader("Formatted Output")
+            if st.session_state.output_df is not None and not st.session_state.output_df.empty:
+                st.dataframe(st.session_state.output_df, use_container_width=True)
+                
+                # Add download button for Excel export
+                from io import BytesIO
+                buffer = BytesIO()
+                st.session_state.output_df.to_excel(buffer, index=False)
+                buffer.seek(0)
+                
+                st.download_button(
+                    label="Download Formatted Report",
+                    data=buffer,  # Use the buffer object
+                    file_name="document_comparison_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.info("No differences found that require formatting.")
+    else:
+        st.info("No comparison results available yet. Please run a comparison first.")
+
+def main():
+    st.title("Document Comparison Tool")
+    
+    # Instructions
+    with st.expander("How to Use"):
+        st.markdown("""
+        ### Instructions
+        1. Upload the company document (DOCX format)
+        2. Upload the customer document (DOCX format) 
+        3. Upload the checklist Excel file
+        4. Enter your OpenAI API key
+        5. Click "Run Comparison"
+        
+        ### About the Tool
+        This tool compares two documents section by section based on the checklist provided.
+        It identifies differences between the documents and categorizes them for easy review.
+        """)
+    
+    # File uploads
+    col1, col2 = st.columns(2)
+    with col1:
+        company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
+    with col2:
+        customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
+    
+    checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
+    
+    # API key input
+    openai_api_key = st.text_input("Enter OpenAI API Key", type="password")
+    
+    # Run comparison button
+    if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and openai_api_key)):
+        with st.spinner("Processing..."):
+            # Save uploaded files to temp directory
+            company_path = save_uploaded_file(company_file)
+            customer_path = save_uploaded_file(customer_file)
+            checklist_path = save_uploaded_file(checklist_file)
+            
+            # Run comparison
+            success = run_comparison(company_path, customer_path, checklist_path, openai_api_key)
+            
+            if success:
+                st.success("Comparison completed successfully!")
+            else:
+                st.error("Comparison failed. Check logs for details.")
+    
+    # Display results if comparison is completed
+    if st.session_state.comparison_completed:
+        display_results()
+
+if __name__ == "__main__":
+    main()
