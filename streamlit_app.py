@@ -708,7 +708,7 @@ def display_results():
             st.session_state.comparison_completed = False
             st.session_state.final_df = None
             st.session_state.output_df = None
-            st.experimental_rerun()
+            st.rerun()
         return
         
     if st.session_state.final_df is not None:
