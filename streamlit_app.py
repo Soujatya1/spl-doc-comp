@@ -436,7 +436,7 @@ def create_single_format_prompt(section_differences):
         "   - 'Annexure 1'\n"
         "   - 'Annexure AA'\n"
         "4. Sub-category of Observation - a concise description that summarizes all the differences for this page intelligently understanding what the differences are about\n\n"
-        "IMPORTANT: Summarize all the page-wise differences into at most TWO rows in your response. "
+        "IMPORTANT: Summarize all the page-wise differences into at most TWO rows in your response. For the Observation Category, is should contain summarized information of what information is different in an intelligent manner"
         "Group similar differences together and provide a consolidated summary rather than listing each individual difference. Please collate all the information correctly and align as per\n\n"
         "Here are the differences found per section:\n\n"
     )
