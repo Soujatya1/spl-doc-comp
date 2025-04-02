@@ -734,20 +734,40 @@ def run_comparison():
         st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
         if df_different.shape[0] > 0:
             st.text("Comparing potentially different rows with LLM...")
-            df_different = compare_dataframe(df_different, openai_api_key)
     
-            # First ensure df_different is a DataFrame
-            if not isinstance(df_different, pd.DataFrame):
-                st.error("Error: compare_dataframe did not return a DataFrame")
-                df_different = pd.DataFrame(df_different) if isinstance(df_different, list) else pd.DataFrame([df_different])
+    # Print the type before comparison
+            st.text(f"Type of df_different before comparison: {type(df_different)}")
     
-            # Combine the results
+            result = compare_dataframe(df_different, openai_api_key)
+    
+    # Print the type after comparison
+            st.text(f"Type of result after comparison: {type(result)}")
+    
+    # Check if it's a DataFrame or something else
+            if isinstance(result, pd.DataFrame):
+                df_different = result
+            else:
+                st.error(f"compare_dataframe returned {type(result)} instead of DataFrame")
+        # Try to convert it to a DataFrame if possible
+                try:
+                    if isinstance(result, dict):
+                        df_different = pd.DataFrame([result])
+                    elif isinstance(result, list):
+                        df_different = pd.DataFrame(result)
+                    else:
+                # Fall back to original df_different
+                        st.warning("Could not convert result to DataFrame, using original df_different")
+                except Exception as e:
+                    st.error(f"Error converting to DataFrame: {e}")
+            # Keep the original df_different
+    
+    # Combine the results
             df_results = pd.concat([df_same, df_different]).sort_values("order")
     
-            # Store the raw results in session state
+    # Store the raw results in session state
             st.session_state.raw_results = df_results
     
-            # Process the formatted output
+    # Process the formatted output
             st.text("Generating formatted output...")
             section_differences = {}
     
