@@ -19,8 +19,6 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 import tiktoken
 import json
-import openpyxl
-from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
 
 # Configure page settings
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
@@ -557,7 +555,7 @@ def generate_formatted_output(_section_differences, openai_api_key):
             
             # Add delay between chunks if needed
             if i < len(prompts) - 1:
-                time.sleep(1)
+                time.sleep(10)
                 
         except Exception as e:
             st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
@@ -752,188 +750,8 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
         st.code(traceback.format_exc())
         return False
 
-def export_to_template(output_df):
-    """
-    Export the comparison results to a template Excel file that matches the requested format.
-    
-    Args:
-        output_df: DataFrame containing the comparison results
-    
-    Returns:
-        BytesIO object containing the Excel file
-    """
-    import pandas as pd
-    from io import BytesIO
-    import openpyxl
-    from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-    
-    # Create a new Excel file
-    buffer = BytesIO()
-    
-    # Create a writer
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Write the data
-        output_df.to_excel(writer, index=False, sheet_name='Comparison Results')
-        
-        # Access the workbook and the worksheet
-        workbook = writer.book
-        worksheet = writer.sheets['Comparison Results']
-        
-        # Define styles
-        header_fill = PatternFill(start_color="66CCFF", end_color="66CCFF", fill_type="solid")
-        border = Border(
-            left=Side(style='thin'), 
-            right=Side(style='thin'), 
-            top=Side(style='thin'), 
-            bottom=Side(style='thin')
-        )
-        header_font = Font(bold=True, size=11)
-        cell_alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-        
-        # Apply styles to header
-        for cell in worksheet[1]:
-            cell.fill = header_fill
-            cell.border = border
-            cell.font = header_font
-            cell.alignment = cell_alignment
-        
-        # Apply styles to all cells and set column widths
-        col_widths = {
-            'A': 20,  # Samples affected
-            'B': 30,  # Observation - Category
-            'C': 25,  # Page
-            'D': 50   # Sub-category of Observation
-        }
-        
-        for col_letter, width in col_widths.items():
-            worksheet.column_dimensions[col_letter].width = width
-        
-        # Apply borders and text wrapping to all cells
-        for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
-            for cell in row:
-                cell.border = border
-                cell.alignment = cell_alignment
-    
-    # Reset buffer position
-    buffer.seek(0)
-    return buffer
-
-def export_to_existing_template(output_df, template_file=None):
-    """
-    Export the comparison results to an existing template Excel file or create a new one
-    with the specified format, handling merged cells correctly.
-    
-    Args:
-        output_df: DataFrame containing the comparison results
-        template_file: Optional file upload object containing the template Excel file
-    
-    Returns:
-        BytesIO object containing the Excel file
-    """
-    import pandas as pd
-    from io import BytesIO
-    import openpyxl
-    from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
-    
-    if template_file is not None:
-        # Load the existing template
-        workbook = openpyxl.load_workbook(template_file)
-        sheet_name = workbook.sheetnames[0]  # Assume first sheet
-        worksheet = workbook[sheet_name]
-        
-        # Get all merged cell ranges
-        merged_ranges = worksheet.merged_cells.ranges
-        
-        # Clear existing data (keeping header)
-        for row in range(2, worksheet.max_row + 1):
-            for col in range(1, worksheet.max_column + 1):
-                cell = worksheet.cell(row=row, column=col)
-                
-                # Skip merged cells that aren't the top-left cell
-                is_merged_cell = False
-                for merged_range in merged_ranges:
-                    if cell.coordinate in merged_range and cell.coordinate != merged_range.start_cell.coordinate:
-                        is_merged_cell = True
-                        break
-                
-                if not is_merged_cell:
-                    try:
-                        cell.value = None
-                    except AttributeError:
-                        pass  # Skip if we can't modify this cell
-    else:
-        # Create a new workbook and worksheet (rest of code remains the same)
-        workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        worksheet.title = "Comparison Results"
-        
-        # Add headers
-        headers = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
-        for col_idx, header in enumerate(headers, start=1):
-            cell = worksheet.cell(row=1, column=col_idx)
-            cell.value = header
-            
-            # Apply header styling
-            cell.fill = PatternFill(start_color="66CCFF", end_color="66CCFF", fill_type="solid")
-            cell.font = Font(bold=True, size=11)
-            cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-            cell.border = Border(
-                left=Side(style='thin'), 
-                right=Side(style='thin'), 
-                top=Side(style='thin'), 
-                bottom=Side(style='thin')
-            )
-        
-        # Set column widths
-        col_widths = {
-            'A': 20,  # Samples affected
-            'B': 30,  # Observation - Category
-            'C': 25,  # Page
-            'D': 50   # Sub-category of Observation
-        }
-        
-        for col_letter, width in col_widths.items():
-            worksheet.column_dimensions[col_letter].width = width
-    
-    # Add data from DataFrame, being careful about merged cells
-    border = Border(
-        left=Side(style='thin'), 
-        right=Side(style='thin'), 
-        top=Side(style='thin'), 
-        bottom=Side(style='thin')
-    )
-    alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    
-    # Get all merged cell ranges again (they might have changed)
-    merged_ranges = worksheet.merged_cells.ranges
-    
-    for row_idx, row_data in enumerate(output_df.itertuples(index=False), start=2):
-        for col_idx, value in enumerate(row_data, start=1):
-            cell = worksheet.cell(row=row_idx, column=col_idx)
-            
-            # Check if this is a merged cell but not the top-left cell
-            is_merged_cell = False
-            for merged_range in merged_ranges:
-                if cell.coordinate in merged_range and cell.coordinate != merged_range.start_cell.coordinate:
-                    is_merged_cell = True
-                    break
-            
-            if not is_merged_cell:
-                try:
-                    cell.value = value
-                    cell.border = border
-                    cell.alignment = alignment
-                except AttributeError:
-                    pass  # Skip if we can't modify this cell
-    
-    # Save to BytesIO
-    buffer = BytesIO()
-    workbook.save(buffer)
-    buffer.seek(0)
-    return buffer
-    
 def display_results():
-    """Display the comparison results with template export options"""
+    """Display the comparison results"""
     st.header("Document Comparison Results")
     
     if st.session_state.comparison_completed:
@@ -943,6 +761,7 @@ def display_results():
             st.session_state.final_df = None
             st.session_state.output_df = None
             st.rerun()
+        
         
     if st.session_state.final_df is not None:
         # Display metrics
@@ -957,7 +776,7 @@ def display_results():
             st.metric("Difference Percentage", f"{percentage_different:.2f}%")
         
         # Display tabs for different views
-        tab1, tab2, tab3, tab4 = st.tabs(["All Comparisons", "Differences Only", "Formatted Output", "Template Export"])
+        tab1, tab2, tab3 = st.tabs(["All Comparisons", "Differences Only", "Formatted Output"])
         
         with tab1:
             st.subheader("All Comparisons")
@@ -981,72 +800,10 @@ def display_results():
                 
                 st.download_button(
                     label="Download Formatted Report",
-                    data=buffer,
+                    data=buffer,  # Use the buffer object
                     file_name="document_comparison_report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            else:
-                st.info("No differences found that require formatting.")
-        
-        with tab4:
-            st.subheader("Template Export")
-            
-            if st.session_state.output_df is not None and not st.session_state.output_df.empty:
-                st.write("Export results to an Excel template similar to your reference format:")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Option to upload a custom template
-                    template_file = st.file_uploader(
-                        "Upload template Excel file (optional)", 
-                        type=["xlsx", "xls"]
-                    )
-                    
-                    if template_file:
-                        st.success("Template file uploaded!")
-                
-                with col2:
-                    # Preview template button
-                    if template_file:
-                        if st.button("Preview Template"):
-                            try:
-                                preview_df = pd.read_excel(template_file)
-                                st.dataframe(preview_df.head(), use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Error previewing template: {e}")
-                
-                # Export buttons
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Export to default template
-                    if st.button("Export to Default Template"):
-                        with st.spinner("Creating template..."):
-                            buffer = export_to_template(st.session_state.output_df)
-                            
-                            st.download_button(
-                                label="Download Default Template Report",
-                                data=buffer,
-                                file_name="document_comparison_template.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="download_default_template"
-                            )
-                
-                with col2:
-                    # Export to custom template
-                    if template_file:
-                        if st.button("Export to Custom Template"):
-                            with st.spinner("Creating custom template..."):
-                                buffer = export_to_existing_template(st.session_state.output_df, template_file)
-                                
-                                st.download_button(
-                                    label="Download Custom Template Report",
-                                    data=buffer,
-                                    file_name="document_comparison_custom_template.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    key="download_custom_template"
-                                )
             else:
                 st.info("No differences found that require formatting.")
     else:
