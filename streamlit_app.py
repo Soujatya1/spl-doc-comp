@@ -557,7 +557,7 @@ def generate_formatted_output(_section_differences, openai_api_key):
             
             # Add delay between chunks if needed
             if i < len(prompts) - 1:
-                time.sleep(10)
+                time.sleep(1)
                 
         except Exception as e:
             st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
