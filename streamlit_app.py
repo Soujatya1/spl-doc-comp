@@ -247,7 +247,10 @@ def process_batch(df_batch, openai_api_key):
     prompt_text += (
         "\n\nCompare the above rows line by line. "
         "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-        "'difference' (if different, a brief explanation with specific difference). Return a JSON list of these objects. Return ONLY the JSON."
+        "'difference' (if different, a brief explanation with the specific difference). "
+        "For spelling differences, always specify both the misspelled word and correct word "
+        "in format: 'Spelling difference: [incorrect word] vs [correct word]'. "
+        "Return a JSON list of these objects. Return ONLY the JSON."
     )
     
     total_tokens = count_tokens(prompt_text)
@@ -419,45 +422,50 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
     return df
 
 def create_single_format_prompt(section_differences):
-    """Create a single format prompt for given section differences with summarization."""
-    prompt = (
-        "I'm analyzing differences between company (Filed Copy) and customer documents. "
-        "I need you to create a summary report with these exact columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
-        "IMPORTANT: For each unique 'Observation - Category', I want ONLY ONE ROW. The 'Page' column should contain the specific section name where the issue was found.\n\n"
-        "These are the categories you MUST use for 'Observation - Category':\n"
-        "1. 'Mismatch of content between Filed Copy and customer copy'\n"
-        "2. 'Available in Filed Copy but missing in Customer Copy'\n"
-        "For 'Page', use these exact section names as appropriate:\n"
-        "   - 'Forwarding letter'\n"
-        "   - 'PREAMBLE'\n"
-        "   - 'Schedule'\n"
-        "   - 'Terms and Conditions'\n"
-        "   - 'Ombudsman Page'\n"
-        "   - 'Annexure 1'\n"
-        "   - 'Annexure AA'\n"
-        " No other sections to be allowed under 'Page'\n"
-        "For 'Samples affected', use either specific sample IDs (when the issue affects specific samples)"
-        "or 'All Samples' (when the issue affects all samples).\n\n"
-        "For 'Sub-category of Observation', provide a concise, specific description of the difference found.\n\n"
-        "Here are the differences found per section:\n\n"
-    )
-    
-    for section, differences in section_differences.items():
-        prompt += f"Section: {section}\n"
-        prompt += "Differences:\n"
-        for diff in differences:
-            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 75)}\n"
-            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 75)}\n"
-            prompt += f"- Difference: {diff['Difference']}\n\n"
-    
-    prompt += (
-        "Create a JSON array where each object has these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n\n"
-        "VERY IMPORTANT: Generate ONLY ONE ROW per unique Observation - Category. Use the most specific and appropriate page name for each row.\n"
-        "For example, if 'Mismatch of content between Filed Copy and customer copy' appears in multiple sections, create only ONE row for it with the most relevant page name.\n\n"
-        "Format your response as a proper JSON array that can be directly parsed. Return ONLY the JSON array."
-    )
-    
-    return prompt
+    """Create a single format prompt for given section differences with summarization."""
+    prompt = (
+        "I'm analyzing differences between company (Filed Copy) and customer documents. "
+        "I need you to create a summary report with these exact columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
+        "IMPORTANT: For each unique 'Observation - Category', I want ONLY ONE ROW. The 'Page' column should contain the specific section name where the issue was found.\n\n"
+        "These are the categories you MUST use for 'Observation - Category':\n"
+        "1. 'Mismatch of content between Filed Copy and customer copy'\n"
+        "2. 'Available in Filed Copy but missing in Customer Copy'\n"
+        "For 'Page', use these exact section names as appropriate:\n"
+        "   - 'Forwarding letter'\n"
+        "   - 'PREAMBLE'\n"
+        "   - 'Schedule'\n"
+        "   - 'Terms and Conditions'\n"
+        "   - 'Ombudsman Page'\n"
+        "   - 'Annexure 1'\n"
+        "   - 'Annexure AA'\n"
+        " No other sections to be allowed under 'Page'\n"
+        "For 'Samples affected', use either specific sample IDs (when the issue affects specific samples)"
+        "or 'All Samples' (when the issue affects all samples).\n\n"
+        "For 'Sub-category of Observation', provide a VERY SPECIFIC description of the difference found. "
+        "For spelling differences, you MUST include both the misspelled word and correct word in format: "
+        "'Spelling difference: [incorrect word] vs [correct word]'. For missing content, specify what content is missing. "
+        "For grammatical differences, include the specific phrases that differ.\n\n"
+        "Here are the differences found per section:\n\n"
+    )
+    
+    for section, differences in section_differences.items():
+        prompt += f"Section: {section}\n"
+        prompt += "Differences:\n"
+        for diff in differences:
+            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 75)}\n"
+            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 75)}\n"
+            prompt += f"- Difference: {diff['Difference']}\n\n"
+    
+    prompt += (
+        "Create a JSON array where each object has these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n\n"
+        "VERY IMPORTANT: Generate ONLY ONE ROW per unique Observation - Category. Use the most specific and appropriate page name for each row.\n"
+        "For example, if 'Mismatch of content between Filed Copy and customer copy' appears in multiple sections, create only ONE row for it with the most relevant page name.\n\n"
+        "When describing spelling differences in 'sub_category', ALWAYS use the format 'Spelling difference: [incorrect word] vs [correct word]' "
+        "to clearly identify the specific spelling issue.\n\n"
+        "Format your response as a proper JSON array that can be directly parsed. Return ONLY the JSON array."
+    )
+    
+    return prompt
 
 def format_output_prompt(section_differences):
     """Create prompts for the second LLM call to format the differences."""
