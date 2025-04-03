@@ -821,7 +821,7 @@ def export_to_template(output_df):
 def export_to_existing_template(output_df, template_file=None):
     """
     Export the comparison results to an existing template Excel file or create a new one
-    with the specified format.
+    with the specified format, handling merged cells correctly.
     
     Args:
         output_df: DataFrame containing the comparison results
@@ -841,12 +841,28 @@ def export_to_existing_template(output_df, template_file=None):
         sheet_name = workbook.sheetnames[0]  # Assume first sheet
         worksheet = workbook[sheet_name]
         
+        # Get all merged cell ranges
+        merged_ranges = worksheet.merged_cells.ranges
+        
         # Clear existing data (keeping header)
         for row in range(2, worksheet.max_row + 1):
             for col in range(1, worksheet.max_column + 1):
-                worksheet.cell(row=row, column=col).value = None
+                cell = worksheet.cell(row=row, column=col)
+                
+                # Skip merged cells that aren't the top-left cell
+                is_merged_cell = False
+                for merged_range in merged_ranges:
+                    if cell.coordinate in merged_range and cell.coordinate != merged_range.start_cell.coordinate:
+                        is_merged_cell = True
+                        break
+                
+                if not is_merged_cell:
+                    try:
+                        cell.value = None
+                    except AttributeError:
+                        pass  # Skip if we can't modify this cell
     else:
-        # Create a new workbook and worksheet
+        # Create a new workbook and worksheet (rest of code remains the same)
         workbook = openpyxl.Workbook()
         worksheet = workbook.active
         worksheet.title = "Comparison Results"
@@ -879,7 +895,7 @@ def export_to_existing_template(output_df, template_file=None):
         for col_letter, width in col_widths.items():
             worksheet.column_dimensions[col_letter].width = width
     
-    # Add data from DataFrame
+    # Add data from DataFrame, being careful about merged cells
     border = Border(
         left=Side(style='thin'), 
         right=Side(style='thin'), 
@@ -888,18 +904,34 @@ def export_to_existing_template(output_df, template_file=None):
     )
     alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
     
+    # Get all merged cell ranges again (they might have changed)
+    merged_ranges = worksheet.merged_cells.ranges
+    
     for row_idx, row_data in enumerate(output_df.itertuples(index=False), start=2):
         for col_idx, value in enumerate(row_data, start=1):
             cell = worksheet.cell(row=row_idx, column=col_idx)
-            cell.value = value
-            cell.border = border
-            cell.alignment = alignment
+            
+            # Check if this is a merged cell but not the top-left cell
+            is_merged_cell = False
+            for merged_range in merged_ranges:
+                if cell.coordinate in merged_range and cell.coordinate != merged_range.start_cell.coordinate:
+                    is_merged_cell = True
+                    break
+            
+            if not is_merged_cell:
+                try:
+                    cell.value = value
+                    cell.border = border
+                    cell.alignment = alignment
+                except AttributeError:
+                    pass  # Skip if we can't modify this cell
     
     # Save to BytesIO
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
     return buffer
+    
 def display_results():
     """Display the comparison results with template export options"""
     st.header("Document Comparison Results")
