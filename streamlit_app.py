@@ -422,41 +422,46 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
     return df
 
 def create_single_format_prompt(section_differences):
-    """Create a more token-efficient format prompt."""
-    # Reuse the core instructions but with more aggressive text truncation
+    """Create a more token-efficient format prompt with specific output structure."""
+    # Clear instructions for the specific output format required
     prompt = (
         "Analyze differences between company and customer documents. "
-        "Create a summary with columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
-        "IMPORTANT: For each unique 'Observation - Category', create ONLY ONE ROW. Valid categories:\n"
+        "Create a summary with EXACTLY ONE ROW for each of these two observation categories:\n"
         "1. 'Mismatch of content between Filed Copy and customer copy'\n"
-        "2. 'Available in Filed Copy but missing in Customer Copy'\n"
-        "Valid 'Page' values: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
-        "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
-        "For 'Sub-category of Observation', provide specific descriptions of differences.\n\n"
-        "Under the two mentioned 'Observation - Category', the 'Page' sections should be displayed and with respect to which a summarized version of all the differences to be shown under 'Sub-category of Observation'\n\n"
-        "Here are the differences:\n\n"
+        "2. 'Available in Filed Copy but missing in Customer Copy'\n\n"
+        
+        "IMPORTANT FORMATTING REQUIREMENTS:\n"
+        "- Generate EXACTLY ONE ROW per observation category (two rows total)\n"
+        "- For each row, in the 'Page' column, list ALL affected page sections separated by semicolons\n"
+        "- In the 'Sub-category of Observation', provide a concise one-line summary for EACH affected page section\n"
+        "- Format the sub-category as: 'Page Section 1: [summary]; Page Section 2: [summary]'\n"
+        "- Valid 'Page' values are: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
+        "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n\n"
+        
+        "Here are the differences to analyze:\n\n"
     )
     
-    # More aggressive truncation when adding difference examples
+    # Add section differences with aggressive truncation
     for section, differences in section_differences.items():
         prompt += f"Section: {section}\n"
         # Limit the number of example differences per section to reduce tokens
-        max_examples = min(10, len(differences))
+        max_examples = min(5, len(differences))
         prompt += f"Showing {max_examples} of {len(differences)} differences:\n"
         
-        # Only include a sample of differences to save tokens
         for diff in differences[:max_examples]:
             prompt += f"- Company: {truncate_text(diff['CompanyLine'], 50)}\n"
             prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 50)}\n"
             prompt += f"- Difference: {truncate_text(diff['Difference'], 50)}\n\n"
         
-        # If we have more differences than shown, add a note
         if len(differences) > max_examples:
             prompt += f"(Plus {len(differences) - max_examples} more differences in this section with similar patterns)\n\n"
     
     prompt += (
         "Create a JSON array with these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n"
-        "Generate ONLY ONE ROW per unique Observation - Category. Return ONLY the JSON array."
+        "The 'page' field should contain ALL affected page sections separated by semicolons.\n"
+        "The 'sub_category' field should contain a concise summary for EACH affected page section in format: "
+        "'Section name: summary; Section name: summary'.\n"
+        "Generate EXACTLY TWO ROWS - one for each observation category. Return ONLY the JSON array."
     )
     
     return prompt
@@ -593,6 +598,38 @@ def generate_formatted_output(_section_differences, openai_api_key):
         for key in ['Samples affected', 'Observation - Category', 'Page', 'Sub-category of Observation']:
             if key not in item:
                 item[key] = ""
+
+    required_categories = [
+        'Mismatch of content between Filed Copy and customer copy',
+        'Available in Filed Copy but missing in Customer Copy'
+    ]
+    
+    # Create a final output with exactly one row per required category
+    final_output = []
+    for category in required_categories:
+        # Find all items for this category across all chunks
+        matching_items = [item for item in all_formatted_outputs 
+                          if item.get('Observation - Category', '').lower() == category.lower()]
+        
+        if matching_items:
+            # Merge all items for this category
+            merged_item = {
+                'Observation - Category': category,
+                'Samples affected': ', '.join(set(item.get('Samples affected', '') for item in matching_items)),
+                'Page': '; '.join(set(p.strip() for item in matching_items 
+                                   for p in item.get('Page', '').split(';'))),
+                'Sub-category of Observation': '; '.join(set(s.strip() for item in matching_items 
+                                                         for s in item.get('Sub-category of Observation', '').split(';')))
+            }
+            final_output.append(merged_item)
+        else:
+            # Create empty row for this category
+            final_output.append({
+                'Observation - Category': category,
+                'Samples affected': '',
+                'Page': '',
+                'Sub-category of Observation': ''
+            })
     
     return final_output
 
