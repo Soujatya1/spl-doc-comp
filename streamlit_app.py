@@ -422,71 +422,73 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
     return df
 
 def create_single_format_prompt(section_differences):
-    """Create a single format prompt for given section differences with summarization."""
+    """Create a more token-efficient format prompt."""
+    # Reuse the core instructions but with more aggressive text truncation
     prompt = (
-        "I'm analyzing differences between company (Filed Copy) and customer documents. "
-        "I need you to create a summary report with these exact columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
-        "IMPORTANT: For each unique 'Observation - Category', I want ONLY ONE ROW. The 'Page' column should contain the specific section name where the issue was found.\n\n"
-        "These are the categories you MUST use for 'Observation - Category':\n"
+        "Analyze differences between company and customer documents. "
+        "Create a summary with columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
+        "IMPORTANT: For each unique 'Observation - Category', create ONLY ONE ROW. Valid categories:\n"
         "1. 'Mismatch of content between Filed Copy and customer copy'\n"
         "2. 'Available in Filed Copy but missing in Customer Copy'\n"
-        "For 'Page', use these exact section names as appropriate:\n"
-        "   - 'Forwarding letter'\n"
-        "   - 'PREAMBLE'\n"
-        "   - 'Schedule'\n"
-        "   - 'Terms and Conditions'\n"
-        "   - 'Ombudsman Page'\n"
-        "   - 'Annexure 1'\n"
-        "   - 'Annexure AA'\n"
-        " No other sections to be allowed under 'Page'\n"
-        "For 'Samples affected', use either specific sample IDs (when the issue affects specific samples)"
-        "or 'All Samples' (when the issue affects all samples).\n\n"
-        "For 'Sub-category of Observation', provide a VERY SPECIFIC description of the difference found. "
-        "For spelling differences, you MUST include both the misspelled word and correct word in format: "
-        "'Spelling difference: [incorrect word] vs [correct word]'. For missing content, specify what content is missing. "
-        "For grammatical differences, include the specific phrases that differ.\n\n"
-        "Here are the differences found per section:\n\n"
+        "Valid 'Page' values: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
+        "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
+        "For 'Sub-category of Observation', provide specific descriptions of differences.\n\n"
+        "Here are the differences:\n\n"
     )
     
+    # More aggressive truncation when adding difference examples
     for section, differences in section_differences.items():
         prompt += f"Section: {section}\n"
-        prompt += "Differences:\n"
-        for diff in differences:
-            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 75)}\n"
-            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 75)}\n"
-            prompt += f"- Difference: {diff['Difference']}\n\n"
+        # Limit the number of example differences per section to reduce tokens
+        max_examples = min(10, len(differences))
+        prompt += f"Showing {max_examples} of {len(differences)} differences:\n"
+        
+        # Only include a sample of differences to save tokens
+        for diff in differences[:max_examples]:
+            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 50)}\n"
+            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 50)}\n"
+            prompt += f"- Difference: {truncate_text(diff['Difference'], 50)}\n\n"
+        
+        # If we have more differences than shown, add a note
+        if len(differences) > max_examples:
+            prompt += f"(Plus {len(differences) - max_examples} more differences in this section with similar patterns)\n\n"
     
     prompt += (
-        "Create a JSON array where each object has these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n\n"
-        "VERY IMPORTANT: Generate ONLY ONE ROW per unique Observation - Category. Use the most specific and appropriate page name for each row.\n"
-        "For example, if 'Mismatch of content between Filed Copy and customer copy' appears in multiple sections, create only ONE row for it with the most relevant page name.\n\n"
-        "When describing spelling differences in 'sub_category', ALWAYS use the format 'Spelling difference: [incorrect word] vs [correct word]' "
-        "to clearly identify the specific spelling issue.\n\n"
-        "Format your response as a proper JSON array that can be directly parsed. Return ONLY the JSON array."
+        "Create a JSON array with these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n"
+        "Generate ONLY ONE ROW per unique Observation - Category. Return ONLY the JSON array."
     )
     
     return prompt
 
 def format_output_prompt(section_differences):
-    """Create prompts for the second LLM call to format the differences."""
+    """Create optimized prompts for the second LLM call to format the differences."""
     prompts = []
     current_sections = {}
     current_diff_count = 0
-    max_diff_per_prompt = 15
+    # Increase max differences per prompt to reduce chunks
+    max_diff_per_prompt = 50  # Increased from 15
     
-    for section, differences in section_differences.items():
-        if current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
+    # Sort sections by number of differences to group small sections together
+    sorted_sections = sorted(section_differences.items(), 
+                           key=lambda x: len(x[1]), 
+                           reverse=True)
+    
+    for section, differences in sorted_sections:
+        # If this section alone has too many differences, split it
+        if len(differences) > max_diff_per_prompt:
+            # Process large sections in larger chunks
+            chunk_size = min(max_diff_per_prompt, max(20, len(differences) // 2))
+            for i in range(0, len(differences), chunk_size):
+                chunk = differences[i:i+chunk_size]
+                prompts.append(create_single_format_prompt({section: chunk}))
+        # If adding this section would exceed our chunk size and we already have content
+        elif current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
             # Create a prompt from current accumulated sections
             prompts.append(create_single_format_prompt(current_sections))
-            current_sections = {}
-            current_diff_count = 0
-        
-        # If a single section has too many differences, split it
-        if len(differences) > max_diff_per_prompt:
-            for i in range(0, len(differences), max_diff_per_prompt):
-                chunk = differences[i:i+max_diff_per_prompt]
-                prompts.append(create_single_format_prompt({section: chunk}))
+            current_sections = {section: differences}
+            current_diff_count = len(differences)
         else:
+            # Add this section to current batch
             current_sections[section] = differences
             current_diff_count += len(differences)
     
@@ -498,20 +500,34 @@ def format_output_prompt(section_differences):
 
 @st.cache_data
 def generate_formatted_output(_section_differences, openai_api_key):
-    """Generate formatted output from section differences with caching and summarization"""
+    """Generate formatted output from section differences with optimized chunking and processing"""
     # Make a deep copy to avoid modifying the original
     section_differences = _section_differences.copy()
     
-    prompts = format_output_prompt(section_differences)
+    # Reduce sections by merging similarities
+    merged_differences = {}
+    for section, differences in section_differences.items():
+        # Group by page category to help consolidate similar pages
+        page_category = section.split()[0] if ' ' in section else section
+        if page_category not in merged_differences:
+            merged_differences[page_category] = []
+        merged_differences[page_category].extend(differences)
+    
+    # Generate prompts from the merged sections
+    prompts = format_output_prompt(merged_differences)
+    st.info(f"Generated {len(prompts)} processing chunks (optimized)")
+    
     all_formatted_outputs = []
     
     for i, prompt in enumerate(prompts):
         st.text(f"Processing format chunk {i+1} of {len(prompts)}")
         
+        # Use a larger context model with higher tokens to process more differences at once
         openai_llm = ChatOpenAI(
             api_key=openai_api_key,
-            model_name="gpt-3.5-turbo-16k",  # Using a larger context model
-            temperature=0.1  # Lower temperature for more consistent formatting
+            model_name="gpt-3.5-turbo-16k",
+            temperature=0.1,
+            max_tokens=2000  # Allow for larger responses
         )
         
         with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
