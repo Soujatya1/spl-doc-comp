@@ -19,6 +19,10 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 import tiktoken
 import json
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+from io import BytesIO
 
 # Configure page settings
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
@@ -750,6 +754,130 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
         st.code(traceback.format_exc())
         return False
 
+def generate_formatted_excel(output_df):
+    """
+    Generate a formatted Excel with merged cells for observation categories
+    and properly structured hierarchical view
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+    
+    # Create a new workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Document Comparison Report"
+    
+    # Add headers
+    headers = ["Observation - Category", "Page", "Sub-category of Observation", "Samples affected"]
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value = header
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    # Define border style
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    
+    # Get unique observation categories in the specific order required
+    categories = [
+        "Mismatch of content between Filed Copy and customer copy",
+        "Available in Filed Copy but missing in Customer Copy"
+    ]
+    
+    # Get unique pages in the specific order required
+    page_order = [
+        "PREAMBLE", 
+        "Forwarding letter", 
+        "Terms and Conditions", 
+        "Schedule", 
+        "Annexure AA", 
+        "Ombudsman Page", 
+        "Annexure 1"
+    ]
+    
+    # Start row for data
+    current_row = 2
+    
+    # Process each category
+    for category in categories:
+        category_df = output_df[output_df["Observation - Category"] == category]
+        
+        if len(category_df) == 0:
+            continue
+        
+        # Record the starting row for this category
+        category_start_row = current_row
+        
+        # Sort the pages according to the specified order
+        pages_in_category = []
+        for page in page_order:
+            if page in category_df["Page"].values:
+                pages_in_category.append(page)
+        
+        # Process each page in the category
+        for page in pages_in_category:
+            page_df = category_df[category_df["Page"] == page]
+            
+            # Write page value
+            page_cell = ws.cell(row=current_row, column=2)
+            page_cell.value = page
+            page_cell.font = Font(bold=True)
+            page_cell.border = thin_border
+            
+            # Record the starting row for this page
+            page_start_row = current_row
+            
+            # Process each observation in the page
+            for _, row in page_df.iterrows():
+                # Write subcategory
+                sub_cell = ws.cell(row=current_row, column=3)
+                sub_cell.value = row["Sub-category of Observation"]
+                sub_cell.border = thin_border
+                sub_cell.alignment = Alignment(wrap_text=True)
+                
+                # Write samples affected
+                samples_cell = ws.cell(row=current_row, column=4)
+                samples_cell.value = row["Samples affected"]
+                samples_cell.border = thin_border
+                
+                current_row += 1
+            
+            # If there's only one row for this page, no need to merge
+            if current_row > page_start_row + 1:
+                ws.merge_cells(f"B{page_start_row}:B{current_row-1}")
+        
+        # Write category value (once per category) and merge
+        if current_row > category_start_row:
+            category_cell = ws.cell(row=category_start_row, column=1)
+            category_cell.value = category
+            category_cell.font = Font(bold=True)
+            category_cell.alignment = Alignment(vertical='center')
+            category_cell.border = thin_border
+            
+            # Merge category cells
+            ws.merge_cells(f"A{category_start_row}:A{current_row-1}")
+    
+    # Set column widths
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["D"].width = 15
+    
+    # Create a BytesIO object to store the workbook
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    
+    return buffer
+
 def display_results():
     """Display the comparison results"""
     st.header("Document Comparison Results")
@@ -761,7 +889,6 @@ def display_results():
             st.session_state.final_df = None
             st.session_state.output_df = None
             st.rerun()
-        
         
     if st.session_state.final_df is not None:
         # Display metrics
@@ -792,15 +919,12 @@ def display_results():
             if st.session_state.output_df is not None and not st.session_state.output_df.empty:
                 st.dataframe(st.session_state.output_df, use_container_width=True)
                 
-                # Add download button for Excel export
-                from io import BytesIO
-                buffer = BytesIO()
-                st.session_state.output_df.to_excel(buffer, index=False)
-                buffer.seek(0)
+                # Use the new formatting function instead of direct Excel export
+                buffer = generate_formatted_excel(st.session_state.output_df)
                 
                 st.download_button(
                     label="Download Formatted Report",
-                    data=buffer,  # Use the buffer object
+                    data=buffer,
                     file_name="document_comparison_report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
