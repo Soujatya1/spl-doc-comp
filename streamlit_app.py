@@ -433,6 +433,7 @@ def create_single_format_prompt(section_differences):
         "Valid 'Page' values: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
         "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
         "For 'Sub-category of Observation', provide specific descriptions of differences.\n\n"
+        "Under the two mentioned 'Observation - Category', the 'Page' sections should be displayed and with respect to which a summarized version of all the differences to be shown under 'Sub-category of Observation'\n\n"
         "Here are the differences:\n\n"
     )
     
