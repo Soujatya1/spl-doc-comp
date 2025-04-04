@@ -426,19 +426,15 @@ def create_single_format_prompt(section_differences):
     # Clear instructions for the specific output format required
     prompt = (
         "Analyze differences between company and customer documents. "
-        "Create a summary with EXACTLY ONE ROW for each of these two observation categories:\n"
+        "Create a summary with columns: 'Samples affected', 'Observation - Category', 'Page', and 'Sub-category of Observation'.\n\n"
+        "IMPORTANT: For each unique 'Observation - Category' AND 'Page' combination, create ONE ROW. Valid categories:\n"
         "1. 'Mismatch of content between Filed Copy and customer copy'\n"
-        "2. 'Available in Filed Copy but missing in Customer Copy'\n\n"
-        
-        "IMPORTANT FORMATTING REQUIREMENTS:\n"
-        "- Generate EXACTLY ONE ROW per observation category (two rows total)\n"
-        "- For each row, in the 'Page' column, list ALL affected page sections separated by semicolons\n"
-        "- In the 'Sub-category of Observation', provide a concise one-line summary for EACH affected page section\n"
-        "- Format the sub-category as: 'Page Section 1: [summary]; Page Section 2: [summary]'\n"
-        "- Valid 'Page' values are: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
-        "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n\n"
-        
-        "Here are the differences to analyze:\n\n"
+        "2. 'Available in Filed Copy but missing in Customer Copy'\n"
+        "Valid 'Page' values: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
+        "'Ombudsman Page', 'Annexure 1', 'Annexure AA', etc. USE THE ACTUAL PAGE NAME FROM THE SECTION.\n"
+        "For 'Sub-category of Observation', provide specific descriptions of differences.\n\n"
+        "Create one summary row for EACH UNIQUE PAGE that has differences.\n\n"
+        "Here are the differences:\n\n"
     )
     
     # Add section differences with aggressive truncation
@@ -513,11 +509,9 @@ def generate_formatted_output(_section_differences, openai_api_key):
     # Reduce sections by merging similarities
     merged_differences = {}
     for section, differences in section_differences.items():
-        # Group by page category to help consolidate similar pages
-        page_category = section.split()[0] if ' ' in section else section
-        if page_category not in merged_differences:
-            merged_differences[page_category] = []
-        merged_differences[page_category].extend(differences)
+        if section not in merged_differences:
+            merged_differences[section] = []
+        merged_differences[section].extend(differences)
     
     # Generate prompts from the merged sections
     prompts = format_output_prompt(merged_differences)
@@ -584,14 +578,16 @@ def generate_formatted_output(_section_differences, openai_api_key):
             st.code(response)
     
     # Deduplicate by Observation - Category (keep only one row per category)
-    category_to_item = {}
+    category_page_to_item = {}
     for item in all_formatted_outputs:
         category = item.get('Observation - Category', '')
-        if category not in category_to_item:
-            category_to_item[category] = item
-    
-    # Convert back to list
-    final_output = list(category_to_item.values())
+        page = item.get('Page', '')
+        key = f"{category}|{page}"
+        if key not in category_page_to_item:
+            category_page_to_item[key] = item
+
+# Convert back to list
+    final_output = list(category_page_to_item.values())
     
     # Ensure all required columns exist
     for item in final_output:
