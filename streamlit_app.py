@@ -1,4 +1,3 @@
-
 import time
 import streamlit as st
 import pandas as pd
@@ -423,30 +422,30 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
     return df
 
 def create_single_format_prompt(section_differences):
-    """Create a more token-efficient format prompt with specific output structure."""
-    # Clear instructions for the specific output format required
+    """Create a prompt for formatting that matches the screenshot"""
     prompt = (
-        "Analyze differences between company and customer documents. "
-        "Create a summary with EXACTLY ONE ROW for each of these two observation categories:\n"
-        "1. 'Mismatch of content between Filed Copy and customer copy'\n"
-        "2. 'Available in Filed Copy but missing in Customer Copy'\n\n"
+        "Analyze the differences between company and customer documents to produce a formatted report.\n\n"
+        "IMPORTANT: Create a table with EXACTLY these column headers:\n"
+        "1. 'Samples affected' - IDs of samples affected or 'All Samples'\n"
+        "2. 'Observation - Category' - Must be one of these two categories:\n"
+        "   - 'Mismatch of content between Filed Copy and customer copy'\n"
+        "   - 'Available in Filed Copy but missing in Customer Copy'\n"
+        "3. 'Page' - The specific document section(s) affected\n"
+        "4. 'Sub-category of Observation' - Detailed description of the issue\n\n"
         
-        "IMPORTANT FORMATTING REQUIREMENTS:\n"
-        "- Generate EXACTLY ONE ROW per observation category (two rows total for each 'Page')\n"
-        "- The 'Page' column should display the values which are: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', "
-        "'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
-        "- In the 'Sub-category of Observation', provide a concise one-line summary for EACH affected page section\n"
-        "- Format the sub-category as: '[summary] of the differences found for the 'Page' under the 'Observation' category\n"
+        "FORMAT RULES:\n"
+        "- Create SEPARATE ROWS for different pages under the same observation category\n"
+        "- For the 'Page' column, use values like: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', 'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
+        "- Be specific about what's different in the 'Sub-category of Observation'\n"
+        "- If specific sample IDs are identified, list them in 'Samples affected', otherwise use 'All Samples'\n\n"
         
         "Here are the differences to analyze:\n\n"
     )
     
-    # Add section differences with aggressive truncation
+    # Add section differences with better organization
     for section, differences in section_differences.items():
         prompt += f"Section: {section}\n"
-        # Limit the number of example differences per section to reduce tokens
         max_examples = min(5, len(differences))
-        prompt += f"Showing {max_examples} of {len(differences)} differences:\n"
         
         for diff in differences[:max_examples]:
             prompt += f"- Company: {truncate_text(diff['CompanyLine'], 50)}\n"
@@ -454,14 +453,23 @@ def create_single_format_prompt(section_differences):
             prompt += f"- Difference: {truncate_text(diff['Difference'], 50)}\n\n"
         
         if len(differences) > max_examples:
-            prompt += f"(Plus {len(differences) - max_examples} more differences in this section with similar patterns)\n\n"
+            prompt += f"(Plus {len(differences) - max_examples} more differences in this section)\n\n"
     
     prompt += (
-        "Create a JSON array with these keys: 'samples_affected', 'observation_category', 'page', 'sub_category'.\n"
-        "The 'page' field should contain ALL affected page sections separated by semicolons.\n"
-        "The 'sub_category' field should contain a concise summary for EACH affected page section in format: "
-        "'Section name: summary; Section name: summary'.\n"
-        "Generate EXACTLY TWO ROWS - one for each observation category. Return ONLY the JSON array."
+        "Return your analysis as a JSON array where each object has these exact keys:\n"
+        "- 'Samples affected'\n"
+        "- 'Observation - Category'\n"
+        "- 'Page'\n"
+        "- 'Sub-category of Observation'\n\n"
+        "Make sure each page gets its own separate row in the output, even under the same category.\n"
+        "The output should match the structure of this example:\n"
+        "[{\n"
+        "  \"Samples affected\": \"All Samples\",\n"
+        "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
+        "  \"Page\": \"FORWARDING LETTER\",\n"
+        "  \"Sub-category of Observation\": \"Document specification is different in filed copy and customer copy\"\n"
+        "}]\n\n"
+        "Return ONLY the JSON array."
     )
     
     return prompt
@@ -506,21 +514,12 @@ def format_output_prompt(section_differences):
 
 @st.cache_data
 def generate_formatted_output(_section_differences, openai_api_key):
-    """Generate formatted output from section differences with optimized chunking and processing"""
+    """Generate formatted output from section differences with improved structure"""
     # Make a deep copy to avoid modifying the original
     section_differences = _section_differences.copy()
     
-    # Reduce sections by merging similarities
-    merged_differences = {}
-    for section, differences in section_differences.items():
-        # Group by page category to help consolidate similar pages
-        page_category = section.split()[0] if ' ' in section else section
-        if page_category not in merged_differences:
-            merged_differences[page_category] = []
-        merged_differences[page_category].extend(differences)
-    
-    # Generate prompts from the merged sections
-    prompts = format_output_prompt(merged_differences)
+    # Generate prompts using the existing function
+    prompts = format_output_prompt(section_differences)
     st.info(f"Generated {len(prompts)} processing chunks (optimized)")
     
     all_formatted_outputs = []
@@ -528,12 +527,12 @@ def generate_formatted_output(_section_differences, openai_api_key):
     for i, prompt in enumerate(prompts):
         st.text(f"Processing format chunk {i+1} of {len(prompts)}")
         
-        # Use a larger context model with higher tokens to process more differences at once
+        # Use gpt-4 for higher quality formatting
         openai_llm = ChatOpenAI(
             api_key=openai_api_key,
-            model_name="gpt-3.5-turbo-16k",
+            model_name="gpt-4-turbo",  # Using a more capable model for formatting
             temperature=0.1,
-            max_tokens=2000  # Allow for larger responses
+            max_tokens=2000
         )
         
         with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
@@ -544,89 +543,80 @@ def generate_formatted_output(_section_differences, openai_api_key):
             continue
         
         try:
-            # Extract JSON from response
+            # Process the JSON response
             response_text = response.strip()
-            # Find JSON array in response
             import re
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 json_text = json_match.group(0)
                 formatted_output = json.loads(json_text)
             else:
-                # Try direct JSON parsing
                 try:
                     formatted_output = json.loads(response_text)
                 except:
-                    # Try as Python literal if JSON fails
                     import ast
                     formatted_output = ast.literal_eval(response_text)
             
-            # Post-process and normalize the output
+            # Standardize the keys to match exact screenshot format
             for item in formatted_output:
-                # Normalize keys
-                if 'samples_affected' in item:
-                    item['Samples affected'] = item.pop('samples_affected')
-                if 'observation_category' in item:
-                    item['Observation - Category'] = item.pop('observation_category')
-                if 'page' in item:
-                    item['Page'] = item.pop('page')
-                if 'sub_category' in item:
-                    item['Sub-category of Observation'] = item.pop('sub_category')
+                # Create standardized dictionary with exact column names
+                standardized_item = {
+                    "Samples affected": item.get("samples_affected", item.get("Samples affected", "")),
+                    "Observation - Category": item.get("observation_category", item.get("Observation - Category", "")),
+                    "Page": item.get("page", item.get("Page", "")),
+                    "Sub-category of Observation": item.get("sub_category", item.get("Sub-category of Observation", ""))
+                }
+                all_formatted_outputs.append(standardized_item)
             
-            all_formatted_outputs.extend(formatted_output)
-            
-            # Add delay between chunks if needed
             if i < len(prompts) - 1:
-                time.sleep(10)
+                time.sleep(5)
                 
         except Exception as e:
             st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
             st.code(response)
     
-    # Deduplicate by Observation - Category (keep only one row per category)
-    category_to_item = {}
-    for item in all_formatted_outputs:
-        category = item.get('Observation - Category', '')
-        if category not in category_to_item:
-            category_to_item[category] = item
-    
-    # Convert back to list
-    final_output = list(category_to_item.values())
-    
-    # Ensure all required columns exist
-    for item in final_output:
-        for key in ['Samples affected', 'Observation - Category', 'Page', 'Sub-category of Observation']:
-            if key not in item:
-                item[key] = ""
-
+    # Ensure we have exactly two categories as in the screenshot
     required_categories = [
         'Mismatch of content between Filed Copy and customer copy',
         'Available in Filed Copy but missing in Customer Copy'
     ]
     
-    # Create a final output with exactly one row per required category
+    # Process into the final format
     final_output = []
     for category in required_categories:
-        # Find all items for this category across all chunks
         matching_items = [item for item in all_formatted_outputs 
                           if item.get('Observation - Category', '').lower() == category.lower()]
         
         if matching_items:
-            # Merge all items for this category
-            merged_item = {
-                'Observation - Category': category,
-                'Samples affected': ', '.join(set(item.get('Samples affected', '') for item in matching_items)),
-                'Page': '; '.join(set(p.strip() for item in matching_items 
-                                   for p in item.get('Page', '').split(';'))),
-                'Sub-category of Observation': '; '.join(set(s.strip() for item in matching_items 
-                                                         for s in item.get('Sub-category of Observation', '').split(';')))
-            }
-            final_output.append(merged_item)
+            # Process pages separately to match the format in the screenshot
+            page_to_subcategories = {}
+            for item in matching_items:
+                pages = [p.strip() for p in item.get('Page', '').split(';') if p.strip()]
+                subcategories = [s.strip() for s in item.get('Sub-category of Observation', '').split(';') if s.strip()]
+                
+                # Match pages with subcategories
+                for p in pages:
+                    if p not in page_to_subcategories:
+                        page_to_subcategories[p] = []
+                    
+                    # Find subcategories that match this page
+                    for sc in subcategories:
+                        if p.lower() in sc.lower() or not any(pg.lower() in sc.lower() for pg in pages):
+                            page_to_subcategories[p].append(sc)
+            
+            # Create separate row for each page
+            for page, subcats in page_to_subcategories.items():
+                final_output.append({
+                    'Samples affected': item.get('Samples affected', 'All Samples'),
+                    'Observation - Category': category,
+                    'Page': page,
+                    'Sub-category of Observation': '; '.join(set(subcats))
+                })
         else:
             # Create empty row for this category
             final_output.append({
+                'Samples affected': 'All Samples',
                 'Observation - Category': category,
-                'Samples affected': '',
                 'Page': '',
                 'Sub-category of Observation': ''
             })
@@ -805,7 +795,7 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
         return False
 
 def display_results():
-    """Display the comparison results"""
+    """Display the comparison results with better formatting"""
     st.header("Document Comparison Results")
     
     if st.session_state.comparison_completed:
@@ -815,8 +805,7 @@ def display_results():
             st.session_state.final_df = None
             st.session_state.output_df = None
             st.rerun()
-        
-        
+    
     if st.session_state.final_df is not None:
         # Display metrics
         df_final = st.session_state.final_df
@@ -844,7 +833,38 @@ def display_results():
         with tab3:
             st.subheader("Formatted Output")
             if st.session_state.output_df is not None and not st.session_state.output_df.empty:
-                st.dataframe(st.session_state.output_df, use_container_width=True)
+                # Apply custom formatting to match screenshot
+                st.markdown("""
+                <style>
+                .comparison-table {
+                    width: 100%;
+                    text-align: left;
+                    border-collapse: collapse;
+                }
+                .comparison-table th {
+                    background-color: #87CEEB;
+                    color: black;
+                    font-weight: bold;
+                    padding: 8px;
+                    border: 1px solid #ddd;
+                }
+                .comparison-table td {
+                    padding: 8px;
+                    border: 1px solid #ddd;
+                }
+                .comparison-table tr:nth-child(even) {
+                    background-color: #f9f9f9;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                # Convert DataFrame to HTML table with styled classes
+                html_table = st.session_state.output_df.to_html(
+                    classes="comparison-table", 
+                    index=False,
+                    escape=False
+                )
+                st.markdown(html_table, unsafe_allow_html=True)
                 
                 # Add download button for Excel export
                 from io import BytesIO
@@ -854,7 +874,7 @@ def display_results():
                 
                 st.download_button(
                     label="Download Formatted Report",
-                    data=buffer,  # Use the buffer object
+                    data=buffer,
                     file_name="document_comparison_report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
