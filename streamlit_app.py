@@ -215,7 +215,7 @@ def create_direct_comparison_prompt(sections_data):
         "and produce a consolidated report. The format of your response is critical.\n\n"
         
         "IMPORTANT: Create a table with EXACTLY these column headers:\n"
-        "1. 'Samples affected' - Should always be 'All Samples'\n"
+        "1. 'Samples affected' - Should always be set to the number mentioned in the input customer document name\n"
         "2. 'Observation - Category' - Must be one of these two categories:\n"
         "   - 'Mismatch of content between Filed Copy and customer copy'\n"
         "   - 'Available in Filed Copy but missing in Customer Copy'\n"
