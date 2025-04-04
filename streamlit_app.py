@@ -248,6 +248,9 @@ def create_direct_comparison_prompt(sections_data):
         "5. For each page, provide a COMPREHENSIVE summary of ALL differences in the 'Sub-category of Observation' column.\n"
         "6. Group all pages with 'Mismatch of content between Filed Copy and customer copy' together first, "
         "   then group all pages with 'Available in Filed Copy but missing in Customer Copy'.\n\n"
+        "7. IMPORTANT: Understand and categorize well between the two Observation categories"
+        "   Under 'Mismatch of content between Filed Copy and customer copy', pointers should only be mentioned if for the given section information is avaialble in both the copies, but there is a mismatch"
+        "   Under 'Available in Filed Copy but missing in Customer Copy', pointers for availability of information in Filed copy and unavailability of the same in Customer copy.\n\n"
         
         "Return your analysis as a JSON array where each object has these keys:\n"
         "- 'Samples affected': Always set to the number mentioned in the input customer document name\n"
