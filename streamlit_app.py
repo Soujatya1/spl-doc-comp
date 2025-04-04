@@ -219,11 +219,11 @@ def create_direct_comparison_prompt(sections_data):
         "   - 'Preamble'\n"
         "   - 'Terms and conditions'\n"
         "   - 'Annexure 1'\n"
-        "   - 'Annexure aa'\n"
+        "   - 'Annexure AA'\n"
         "   - 'Forwarding Letter'\n"
         "   - 'Ombudsman Page'\n"
         "   - 'Schedule'\n"
-        "4. 'Sub-category of Observation' - Detailed description of the issue\n\n"
+        "4. 'Sub-category of Observation' - Comprehensive summary of ALL differences for that page\n\n"
         
         "Here are the sections to compare:\n\n"
     )
@@ -239,25 +239,30 @@ def create_direct_comparison_prompt(sections_data):
         "INSTRUCTIONS:\n"
         "1. Compare the content of each section carefully.\n"
         "2. Identify meaningful differences - ignore minor formatting, spacing, or punctuation differences.\n"
-        "3. Categorize each difference into one of the two observation categories mentioned above.\n"
-        "4. For each section with differences, create an entry in the output table.\n"
-        "5. Be specific about what's different in the 'Sub-category of Observation' column.\n\n"
+        "3. First categorize each section into one of the two observation categories mentioned above.\n"
+        "4. Create ONE ROW PER PAGE in the output table, grouping by category.\n"
+        "5. For each page, provide a COMPREHENSIVE summary of ALL differences in the 'Sub-category of Observation' column.\n"
+        "6. Group all pages with 'Mismatch of content between Filed Copy and customer copy' together first, "
+        "   then group all pages with 'Available in Filed Copy but missing in Customer Copy'.\n\n"
         
         "Return your analysis as a JSON array where each object has these keys:\n"
         "- 'Samples affected': Always set to 'All Samples'\n"
         "- 'Observation - Category': One of the two categories listed above\n"
-        "- 'Page': One of the categories mentioned above\n"
-        "- 'Sub-category of Observation': Detailed description of the difference\n\n"
+        "- 'Page': One of the page categories mentioned above\n"
+        "- 'Sub-category of Observation': Comprehensive summary of ALL differences for that page\n\n"
         
         "Example structure:\n"
         "[{\n"
         "  \"Samples affected\": \"All Samples\",\n"
         "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
-        "  \"Page\": \"Forwarding letter\",\n"
-        "  \"Sub-category of Observation\": \"Company version mentions a 30-day response period while customer version states 15 days\"\n"
+        "  \"Page\": \"Forwarding Letter\",\n"
+        "  \"Sub-category of Observation\": \"1. Company version mentions a 30-day response period while customer version states 15 days. "
+        "2. Company version includes contact details that are missing in customer version.\"\n"
         "}]\n\n"
         
-        "Return ONLY the JSON array with your findings."
+        "IMPORTANT: Create exactly ONE row for each affected page within each category (do not create multiple rows for the same page in the same category). "
+        "Make sure each 'Page' appears only once under each 'Observation - Category'. "
+        "Group rows by 'Observation - Category'."
     )
     
     return prompt
@@ -297,6 +302,46 @@ def chunk_sections_by_token_count(sections_data, max_tokens=6000):
         chunks.append(current_chunk)
     
     return chunks
+
+def organize_comparison_results(output_df):
+    """Organize comparison results by category and page"""
+    if output_df.empty:
+        return output_df
+        
+    # Define the order of categories
+    category_order = [
+        "Mismatch of content between Filed Copy and customer copy",
+        "Available in Filed Copy but missing in Customer Copy"
+    ]
+    
+    # Define the order of pages
+    page_order = [
+        "Forwarding Letter", 
+        "Schedule", 
+        "Terms and Conditions",
+        "Ombudsman Page",
+        "Annexure AA",
+        "Annexure 1",
+        "Preamble"
+    ]
+    
+    # Create category and page ordering for sorting
+    output_df['category_order'] = output_df['Observation - Category'].apply(
+        lambda x: category_order.index(x) if x in category_order else 999
+    )
+    
+    # Create page ordering
+    output_df['page_order'] = output_df['Page'].apply(
+        lambda x: page_order.index(x) if x in page_order else 999
+    )
+    
+    # Sort by category first, then by page
+    sorted_df = output_df.sort_values(['category_order', 'page_order'])
+    
+    # Drop temporary columns
+    sorted_df = sorted_df.drop(['category_order', 'page_order'], axis=1)
+    
+    return sorted_df
 
 @st.cache_data
 def direct_document_comparison(sections_data, groq_api_key):
@@ -367,36 +412,39 @@ def direct_document_comparison(sections_data, groq_api_key):
     
     # Process results into final DataFrame
     if all_results:
-        # Standardize column names
+    # Standardize column names
         for result in all_results:
             for key in list(result.keys()):
                 if key.lower() == "samples affected" or key.lower() == "samples_affected":
                     result["Samples affected"] = result.pop(key)
-                elif key.lower() == "observation - category" or key.lower() == "observation_category":
+                 elif key.lower() == "observation - category" or key.lower() == "observation_category":
                     result["Observation - Category"] = result.pop(key)
                 elif key.lower() == "page":
                     result["Page"] = result.pop(key)
                 elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
                     result["Sub-category of Observation"] = result.pop(key)
-        
-        # Create DataFrame
+    
+    # Create DataFrame
         output_df = pd.DataFrame(all_results)
-        
-        # Ensure required columns exist
+    
+    # Ensure required columns exist
         required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
         for col in required_columns:
             if col not in output_df.columns:
                 output_df[col] = ""
-        
-        # Reorder columns
+    
+    # Reorder columns
         output_df = output_df[required_columns]
-        
-        # Set default value for Samples affected
+    
+    # Set default value for Samples affected
         output_df["Samples affected"] = "All Samples"
-        
+    
+    # Organize results by category and page
+        output_df = organize_comparison_results(output_df)
+    
         return output_df
     else:
-        # Return empty DataFrame with required columns
+    # Return empty DataFrame with required columns
         return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
 
 def save_uploaded_file(uploaded_file):
