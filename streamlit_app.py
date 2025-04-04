@@ -417,7 +417,7 @@ def direct_document_comparison(sections_data, groq_api_key):
             for key in list(result.keys()):
                 if key.lower() == "samples affected" or key.lower() == "samples_affected":
                     result["Samples affected"] = result.pop(key)
-                 elif key.lower() == "observation - category" or key.lower() == "observation_category":
+                elif key.lower() == "observation - category" or key.lower() == "observation_category":
                     result["Observation - Category"] = result.pop(key)
                 elif key.lower() == "page":
                     result["Page"] = result.pop(key)
