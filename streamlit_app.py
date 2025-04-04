@@ -17,6 +17,7 @@ from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 import tiktoken
 import json
 
@@ -229,7 +230,7 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
             })
     return matching_sections
 
-def process_batch(df_batch, openai_api_key):
+def process_batch(df_batch, groq_api_key):
     """Process a batch of rows with improved prompt construction and error handling."""
     # Prepare the prompt with fixed truncation
     prompt_lines = []
@@ -268,25 +269,25 @@ def process_batch(df_batch, openai_api_key):
             for idx, row in df_batch.iterrows():
                 df_batch.at[idx, 'CompanyLine'] = truncate_text(str(row['CompanyLine']), max_tokens=50)
                 df_batch.at[idx, 'CustomerLine'] = truncate_text(str(row['CustomerLine']), max_tokens=50)
-            return process_batch(df_batch, openai_api_key)
+            return process_batch(df_batch, groq_api_key)
         
         # Process each half separately
-        first_half_results = process_batch(df_batch.iloc[:half_size], openai_api_key)
-        second_half_results = process_batch(df_batch.iloc[half_size:], openai_api_key)
+        first_half_results = process_batch(df_batch.iloc[:half_size], groq_api_key)
+        second_half_results = process_batch(df_batch.iloc[half_size:], groq_api_key)
         
         # Combine results
         return first_half_results + second_half_results
     
     # If we're here, the prompt is within token limits
-    openai_llm = ChatOpenAI(
-        api_key=openai_api_key,
-        model_name="gpt-3.5-turbo",
+    groq_llm = ChatGroq(
+        api_key=groq_api_key,
+        model_name="llama3-8b-8192",
         max_tokens=1000
     )
     
     with st.spinner("Processing text comparison with LLM..."):
         try:
-            response = openai_llm.invoke([
+            response = groq_llm.invoke([
                 {"role": "user", "content": prompt_text}
             ]).content
         except Exception as e:
@@ -359,7 +360,7 @@ def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
     return chunks
 
 @st.cache_data
-def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
+def compare_dataframe(_df, groq_api_key, batch_size=50, rate_limit_delay=20):
     """Compare dataframe contents with caching to prevent re-processing"""
     # Make a deep copy to avoid modifying the original
     df = _df.copy()
@@ -397,7 +398,7 @@ def compare_dataframe(_df, openai_api_key, batch_size=50, rate_limit_delay=20):
                         time.sleep(delay_time)
                     
                     st.text(f"Processing token chunk {token_chunk_idx+1} of {len(token_chunks)} ({len(token_chunk)} rows)")
-                    chunk_comparisons = process_batch(token_chunk, openai_api_key)
+                    chunk_comparisons = process_batch(token_chunk, groq_api_key)
                     batch_comparisons.extend(chunk_comparisons)
                     break
                     
@@ -518,7 +519,7 @@ def format_output_prompt(section_differences):
     return prompts
 
 @st.cache_data
-def generate_formatted_output(_section_differences, openai_api_key):
+def generate_formatted_output(_section_differences, groq_api_key):
     """Generate formatted output from section differences with improved structure"""
     # Make a deep copy to avoid modifying the original
     section_differences = _section_differences.copy()
@@ -532,16 +533,14 @@ def generate_formatted_output(_section_differences, openai_api_key):
     for i, prompt in enumerate(prompts):
         st.text(f"Processing format chunk {i+1} of {len(prompts)}")
         
-        # Use gpt-4 for higher quality formatting
-        openai_llm = ChatOpenAI(
-            api_key=openai_api_key,
-            model_name="gpt-4-turbo",  # Using a more capable model for formatting
-            temperature=0.1,
-            max_tokens=2000
+        groq_llm = ChatGroq(
+            api_key=groq_api_key,
+            model_name="llama3-8b-8192",
+            max_tokens=1000
         )
         
         with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
-            response = openai_llm.invoke([{"role": "user", "content": prompt}]).content
+            response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
         
         if not response.strip():
             st.warning(f"Empty response from format LLM in chunk {i+1}.")
@@ -636,7 +635,7 @@ def save_uploaded_file(uploaded_file):
         return file_path
     return None
 
-def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
+def run_comparison(company_path, customer_path, checklist_path, groq_api_key):
     """Run the comparison process in steps, with state tracking"""
     progress_container = st.empty()
     
@@ -735,7 +734,7 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
             
             if not df_different.empty:
                 st.text("Analyzing differences with LLM...")
-                df_diff_compared = compare_dataframe(df_different, openai_api_key, batch_size=10)
+                df_diff_compared = compare_dataframe(df_different, groq_api_key, batch_size=10)
             else:
                 df_diff_compared = df_different.copy()
             
@@ -766,7 +765,7 @@ def run_comparison(company_path, customer_path, checklist_path, openai_api_key):
             formatted_output = []
             if section_differences:
                 st.text("Generating formatted output...")
-                formatted_output = generate_formatted_output(section_differences, openai_api_key)
+                formatted_output = generate_formatted_output(section_differences, groq_api_key)
             
             if formatted_output:
                 output_df = pd.DataFrame(formatted_output)
@@ -916,10 +915,10 @@ def main():
     checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
     
     # API key input
-    openai_api_key = st.text_input("Enter OpenAI API Key", type="password")
+    groq_api_key = st.text_input("Enter OpenAI API Key", type="password")
     
     # Run comparison button
-    if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and openai_api_key)):
+    if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and groq_api_key)):
         with st.spinner("Processing..."):
             # Save uploaded files to temp directory
             company_path = save_uploaded_file(company_file)
@@ -927,7 +926,7 @@ def main():
             checklist_path = save_uploaded_file(checklist_file)
             
             # Run comparison
-            success = run_comparison(company_path, customer_path, checklist_path, openai_api_key)
+            success = run_comparison(company_path, customer_path, checklist_path, groq_api_key)
             
             if success:
                 st.success("Comparison completed successfully!")
