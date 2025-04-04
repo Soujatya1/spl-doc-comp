@@ -18,6 +18,10 @@ from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
 import tiktoken
 import json
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 # Configure page settings
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
@@ -600,10 +604,103 @@ def display_results():
             )
             st.markdown(html_table, unsafe_allow_html=True)
             
-            # Add download button for Excel export
+            # Add download button for Excel export with merged cells
             from io import BytesIO
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
+            
             buffer = BytesIO()
-            st.session_state.output_df.to_excel(buffer, index=False)
+            
+            # Create a workbook and select the active worksheet
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Comparison Report"
+            
+            # Add headers
+            headers = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
+            for col_idx, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.value = header
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = Border(
+                    left=Side(style="thin"),
+                    right=Side(style="thin"),
+                    top=Side(style="thin"),
+                    bottom=Side(style="thin")
+                )
+            
+            # Add data rows
+            df = st.session_state.output_df
+            current_category = None
+            category_start_row = 2
+            row_idx = 2
+            
+            # Group by Observation Category
+            for category in df['Observation - Category'].unique():
+                category_df = df[df['Observation - Category'] == category]
+                category_start_row = row_idx
+                
+                for _, row_data in category_df.iterrows():
+                    # Samples affected column
+                    cell = ws.cell(row=row_idx, column=1)
+                    cell.value = row_data["Samples affected"]
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = Border(
+                        left=Side(style="thin"),
+                        right=Side(style="thin"),
+                        top=Side(style="thin"),
+                        bottom=Side(style="thin")
+                    )
+                    
+                    # Observation - Category column (will be merged later)
+                    cell = ws.cell(row=row_idx, column=2)
+                    cell.value = category if row_idx == category_start_row else None
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    cell.border = Border(
+                        left=Side(style="thin"),
+                        right=Side(style="thin"),
+                        top=Side(style="thin"),
+                        bottom=Side(style="thin")
+                    )
+                    
+                    # Page column
+                    cell = ws.cell(row=row_idx, column=3)
+                    cell.value = row_data["Page"]
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = Border(
+                        left=Side(style="thin"),
+                        right=Side(style="thin"),
+                        top=Side(style="thin"),
+                        bottom=Side(style="thin")
+                    )
+                    
+                    # Sub-category column
+                    cell = ws.cell(row=row_idx, column=4)
+                    cell.value = row_data["Sub-category of Observation"]
+                    cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                    cell.border = Border(
+                        left=Side(style="thin"),
+                        right=Side(style="thin"),
+                        top=Side(style="thin"),
+                        bottom=Side(style="thin")
+                    )
+                    
+                    row_idx += 1
+                
+                # Merge cells for the category if there are multiple rows
+                if row_idx > category_start_row + 1:
+                    ws.merge_cells(start_row=category_start_row, start_column=2, end_row=row_idx-1, end_column=2)
+            
+            # Adjust column widths
+            ws.column_dimensions['A'].width = 15
+            ws.column_dimensions['B'].width = 40
+            ws.column_dimensions['C'].width = 20
+            ws.column_dimensions['D'].width = 60
+            
+            # Save the workbook to buffer
+            wb.save(buffer)
             buffer.seek(0)
             
             st.download_button(
