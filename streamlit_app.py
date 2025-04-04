@@ -16,8 +16,6 @@ from langchain.docstore.document import Document as LangchainDocument
 from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
 from langchain_groq import ChatGroq
-from langchain_openai import ChatOpenAI
-from langchain_groq import ChatGroq
 import tiktoken
 import json
 
@@ -174,30 +172,6 @@ def store_sections_in_faiss(docx_path, checklist_df):
     progress_bar.empty()
     return faiss_index
 
-def split_text_into_lines(text):
-    return re.split(r'\n|\||\. ', text)
-
-def find_best_line_match(target, lines):
-    target = target.lower().strip()
-
-    if len(target) < 10:
-        custom_threshold = 90
-    elif len(target) < 50:
-        custom_threshold = 75
-    else:
-        custom_threshold = 65
-
-    best = process.extractOne(
-        query=target,
-        choices=lines,
-        scorer=fuzz.ratio,
-        score_cutoff=custom_threshold
-    )
-    if best:
-        return best[0]
-    else:
-        return ""
-
 def extract_content_within_markers(text, start_marker, end_marker):
     lines = text.split("\n")
     best_start = find_closest_match(start_marker, lines)
@@ -230,427 +204,193 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
             })
     return matching_sections
 
-def process_batch(df_batch, groq_api_key):
-    """Process a batch of rows with improved prompt construction and error handling."""
-    # Prepare the prompt with fixed truncation
-    prompt_lines = []
-    for idx, row in df_batch.iterrows():
-        # Aggressive truncation to save tokens
-        company_text = truncate_text(str(row['CompanyLine']), max_tokens=100)
-        customer_text = truncate_text(str(row['CustomerLine']), max_tokens=100)
-        
-        prompt_lines.append(f"Row {idx}:")
-        prompt_lines.append(f"Company: {company_text}")
-        prompt_lines.append(f"Customer: {customer_text}")
-        prompt_lines.append("---")
-    
-    prompt_text = "\n".join(prompt_lines)
-    prompt_text += (
-        "\n\nCompare the above rows line by line. "
-        "For each row, output a JSON object with keys 'row' (the row number), 'comparison' (SAME or DIFFERENT), and "
-        "'difference' (if different, a brief explanation with the specific difference). "
-        "For spelling differences, always specify both the misspelled word and correct word "
-        "in format: 'Spelling difference: [incorrect word] vs [correct word]'. "
-        "Return a JSON list of these objects. Return ONLY the JSON."
-    )
-    
-    total_tokens = count_tokens(prompt_text)
-    st.info(f"Batch Prompt Tokens: {total_tokens}")
-    
-    # If the prompt is still too large, split the batch
-    if total_tokens > 4000:
-        st.warning(f"Prompt too large ({total_tokens} tokens). Splitting batch.")
-        
-        # Split the batch in half and process each separately
-        half_size = len(df_batch) // 2
-        if half_size == 0:  # Can't split further
-            st.error("Cannot split batch further. Individual rows may be too large.")
-            # Try with extreme truncation for this batch
-            for idx, row in df_batch.iterrows():
-                df_batch.at[idx, 'CompanyLine'] = truncate_text(str(row['CompanyLine']), max_tokens=50)
-                df_batch.at[idx, 'CustomerLine'] = truncate_text(str(row['CustomerLine']), max_tokens=50)
-            return process_batch(df_batch, groq_api_key)
-        
-        # Process each half separately
-        first_half_results = process_batch(df_batch.iloc[:half_size], groq_api_key)
-        second_half_results = process_batch(df_batch.iloc[half_size:], groq_api_key)
-        
-        # Combine results
-        return first_half_results + second_half_results
-    
-    # If we're here, the prompt is within token limits
-    groq_llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="llama3-8b-8192",
-        max_tokens=1000
-    )
-    
-    with st.spinner("Processing text comparison with LLM..."):
-        try:
-            response = groq_llm.invoke([
-                {"role": "user", "content": prompt_text}
-            ]).content
-        except Exception as e:
-            st.error(f"LLM Processing Error: {e}")
-            return []
-    
-    if not response.strip():
-        st.warning("Empty response from LLM.")
-        return []
-    
-    try:
-        response_text = response.strip()
-        
-        try:
-            comparisons = json.loads(response_text)
-        except json.JSONDecodeError:
-            import re
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if json_match:
-                json_text = json_match.group(0)
-                comparisons = json.loads(json_text)
-            else:
-                import ast
-                try:
-                    comparisons = ast.literal_eval(response_text)
-                except:
-                    st.error("Could not parse response as JSON or Python literal")
-                    comparisons = []
-    
-    except Exception as e:
-        st.error(f"Comprehensive JSON Parsing Error: {e}")
-        st.code(response)
-        comparisons = []
-    
-    return comparisons
-
-def chunk_dataframe_into_batches(df, batch_size=50):
-    """Split a dataframe into chunks of specified batch size."""
-    return [df.iloc[i:i+batch_size] for i in range(0, len(df), batch_size)]
-
-def chunk_dataframe_with_token_reduction(df, max_tokens=3000):
-    """Split a dataframe into chunks based on token count."""
-    chunks = []
-    current_chunk = []
-    current_tokens = 0
-    
-    for _, row in df.iterrows():
-        row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
-        row_tokens = count_tokens(row_text)
-        
-        # If this single row exceeds max tokens, truncate it
-        if row_tokens > max_tokens:
-            row = row.copy()  # Create a copy to avoid modifying the original
-            row['CompanyLine'] = truncate_text(row['CompanyLine'], max_tokens // 2)
-            row['CustomerLine'] = truncate_text(row['CustomerLine'], max_tokens // 2)
-            row_text = f"Row {row.name}: {row['CompanyLine']} | {row['CustomerLine']}"
-            row_tokens = count_tokens(row_text)
-        
-        if current_tokens + row_tokens > max_tokens and current_chunk:
-            chunks.append(pd.DataFrame(current_chunk))
-            current_chunk = []
-            current_tokens = 0
-        
-        current_chunk.append(row)
-        current_tokens += row_tokens
-    
-    if current_chunk:
-        chunks.append(pd.DataFrame(current_chunk))
-    
-    return chunks
-
-@st.cache_data
-def compare_dataframe(_df, groq_api_key, batch_size=50, rate_limit_delay=20):
-    """Compare dataframe contents with caching to prevent re-processing"""
-    # Make a deep copy to avoid modifying the original
-    df = _df.copy()
-    
-    if df.empty:
-        return df
-    
-    # Limit to 100 rows for testing/demo (optional)
-    df = df.head(100)
-    
-    progress_bar = st.progress(0)
-    
-    # Split the dataframe into fixed-size batches
-    df_batches = chunk_dataframe_into_batches(df, batch_size=batch_size)
-    
-    all_comparisons = []
-    max_retries = 3
-    
-    for batch_idx, batch in enumerate(df_batches):
-        st.text(f"Processing batch {batch_idx+1} of {len(df_batches)} ({len(batch)} rows)")
-        
-        # Initialize a new batch_comparisons list
-        batch_comparisons = []
-        
-        # Further chunk each batch based on token count
-        token_chunks = chunk_dataframe_with_token_reduction(batch, max_tokens=3000)
-        st.info(f"Split into {len(token_chunks)} token-based chunks")
-        
-        for token_chunk_idx, token_chunk in enumerate(token_chunks):
-            for attempt in range(max_retries):
-                try:
-                    if token_chunk_idx > 0 or batch_idx > 0:
-                        delay_time = max(5, min(20, rate_limit_delay // len(token_chunks)))
-                        st.info(f"Waiting {delay_time} seconds to avoid rate limiting...")
-                        time.sleep(delay_time)
-                    
-                    st.text(f"Processing token chunk {token_chunk_idx+1} of {len(token_chunks)} ({len(token_chunk)} rows)")
-                    chunk_comparisons = process_batch(token_chunk, groq_api_key)
-                    batch_comparisons.extend(chunk_comparisons)
-                    break
-                    
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        st.warning(f"Attempt {attempt + 1} failed for chunk {token_chunk_idx}. Retrying... Error: {e}")
-                        time.sleep(rate_limit_delay)
-                    else:
-                        st.error(f"Failed after {max_retries} attempts for chunk {token_chunk_idx}. Error: {e}")
-        
-        all_comparisons.extend(batch_comparisons)
-        progress_bar.progress((batch_idx + 1) / len(df_batches))
-    
-    progress_bar.empty()
-
-    # Map the comparison results back to the dataframe
-    df['Comparison'] = df.index.map(
-        lambda idx: next((item['comparison'] for item in all_comparisons if str(item.get('row', '')) == str(idx)), "N/A"))
-    df['Difference'] = df.index.map(
-        lambda idx: next((item.get('difference', '') for item in all_comparisons if str(item.get('row', '')) == str(idx)), ""))
-    
-    return df
-
-def create_single_format_prompt(section_differences):
-    """Create a prompt for formatting that matches the screenshot"""
+def create_direct_comparison_prompt(sections_data):
+    """Create a prompt for direct comparison of document sections"""
     prompt = (
-        "Analyze the differences between company and customer documents to produce a consolidated report.\n\n"
+        "You are a document comparison expert. You will analyze differences between company and customer document sections "
+        "and produce a consolidated report. The format of your response is critical.\n\n"
+        
         "IMPORTANT: Create a table with EXACTLY these column headers:\n"
-        "1. 'Samples affected' - IDs of samples affected or 'All Samples'\n"
+        "1. 'Samples affected' - Should always be 'All Samples'\n"
         "2. 'Observation - Category' - Must be one of these two categories:\n"
         "   - 'Mismatch of content between Filed Copy and customer copy'\n"
         "   - 'Available in Filed Copy but missing in Customer Copy'\n"
         "3. 'Page' - The specific document section(s) affected\n"
         "4. 'Sub-category of Observation' - Detailed description of the issue\n\n"
         
-        "For each category row:\n"
-        "- Create a MERGED ROW for different pages under the same observation category\n"
-        "- For the 'Page' column, use values like: 'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', 'Ombudsman Page', 'Annexure 1', 'Annexure AA'\n"
-        "- Be specific and summarized in an intelligent way about what's different in the 'Sub-category of Observation'\n"
-        "- Use 'All Samples' for the 'Samples affected' column\n\n"
-        
-        "Here are the differences to analyze:\n\n"
+        "Here are the sections to compare:\n\n"
     )
     
-    # Add section differences with better organization
-    for section, differences in section_differences.items():
-        prompt += f"Section: {section}\n"
-        max_examples = min(5, len(differences))
-        
-        for diff in differences[:max_examples]:
-            prompt += f"- Company: {truncate_text(diff['CompanyLine'], 50)}\n"
-            prompt += f"- Customer: {truncate_text(diff['CustomerLine'], 50)}\n"
-            prompt += f"- Difference: {truncate_text(diff['Difference'], 50)}\n\n"
-        
-        if len(differences) > max_examples:
-            prompt += f"(Plus {len(differences) - max_examples} more differences in this section)\n\n"
+    # Add each section's content for comparison
+    for section_name, data in sections_data.items():
+        prompt += f"SECTION: {section_name}\n"
+        prompt += f"COMPANY VERSION:\n{truncate_text(data['company_text'], 500)}\n\n"
+        prompt += f"CUSTOMER VERSION:\n{truncate_text(data['customer_text'], 500)}\n\n"
+        prompt += "---\n\n"
     
     prompt += (
-        "Return your analysis as a JSON array with EXACTLY TWO OBJECTS (one per category), where each object has these keys:\n"
+        "INSTRUCTIONS:\n"
+        "1. Compare the content of each section carefully.\n"
+        "2. Identify meaningful differences - ignore minor formatting, spacing, or punctuation differences.\n"
+        "3. Categorize each difference into one of the two observation categories mentioned above.\n"
+        "4. For each section with differences, create an entry in the output table.\n"
+        "5. Be specific about what's different in the 'Sub-category of Observation' column.\n\n"
+        
+        "Return your analysis as a JSON array where each object has these keys:\n"
         "- 'Samples affected': Always set to 'All Samples'\n"
         "- 'Observation - Category': One of the two categories listed above\n"
-        "- 'Page': ALL affected pages/sections as mentioned above, separated by rows\n"
-        "- 'Sub-category of Observation': ALL issues for that category, separated by lines\n\n"
+        "- 'Page': The affected section name\n"
+        "- 'Sub-category of Observation': Detailed description of the difference\n\n"
+        
         "Example structure:\n"
         "[{\n"
         "  \"Samples affected\": \"All Samples\",\n"
         "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
-        "  \"Page\": \"'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', 'Ombudsman Page', 'Annexure 1', 'Annexure AA' (in different rows)\",\n"
-        "  \"Sub-category of Observation\": \"Summarized differences (in different lines)\"\n"
-        "},\n"
-        "{\n"
-        "  \"Samples affected\": \"All Samples\",\n"
-        "  \"Observation - Category\": \"Available in Filed Copy but missing in Customer Copy\",\n"
-        "  \"Page\": \"'Forwarding letter', 'PREAMBLE', 'Schedule', 'Terms and Conditions', 'Ombudsman Page', 'Annexure 1', 'Annexure AA' (in different rows)\",\n"
-        "  \"Sub-category of Observation\": \"Summarized differences (in different lines)\"\n"
+        "  \"Page\": \"Forwarding letter\",\n"
+        "  \"Sub-category of Observation\": \"Company version mentions a 30-day response period while customer version states 15 days\"\n"
         "}]\n\n"
-        "Return ONLY the JSON array."
+        
+        "Return ONLY the JSON array with your findings."
     )
     
     return prompt
 
-def format_output_prompt(section_differences):
-    """Create optimized prompts for the second LLM call to format the differences."""
-    prompts = []
-    current_sections = {}
-    current_diff_count = 0
-    # Increase max differences per prompt to reduce chunks
-    max_diff_per_prompt = 50  # Increased from 15
+def chunk_sections_by_token_count(sections_data, max_tokens=6000):
+    """Split sections into chunks based on token count for processing"""
+    chunks = []
+    current_chunk = {}
+    current_tokens = 0
     
-    # Sort sections by number of differences to group small sections together
-    sorted_sections = sorted(section_differences.items(), 
-                           key=lambda x: len(x[1]), 
-                           reverse=True)
+    for section_name, data in sections_data.items():
+        # Calculate tokens for this section
+        section_text = f"SECTION: {section_name}\nCOMPANY VERSION:\n{data['company_text']}\n\nCUSTOMER VERSION:\n{data['customer_text']}\n\n"
+        section_tokens = count_tokens(section_text)
+        
+        # If this single section exceeds max tokens, truncate it
+        if section_tokens > max_tokens:
+            data_copy = data.copy()
+            data_copy['company_text'] = truncate_text(data['company_text'], max_tokens // 2)
+            data_copy['customer_text'] = truncate_text(data['customer_text'], max_tokens // 2)
+            truncated_section_text = f"SECTION: {section_name}\nCOMPANY VERSION:\n{data_copy['company_text']}\n\nCUSTOMER VERSION:\n{data_copy['customer_text']}\n\n"
+            section_tokens = count_tokens(truncated_section_text)
+            data = data_copy
+        
+        # If adding this section would exceed the token limit, start a new chunk
+        if current_tokens + section_tokens > max_tokens and current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = {}
+            current_tokens = 0
+        
+        # Add section to current chunk
+        current_chunk[section_name] = data
+        current_tokens += section_tokens
     
-    for section, differences in sorted_sections:
-        # If this section alone has too many differences, split it
-        if len(differences) > max_diff_per_prompt:
-            # Process large sections in larger chunks
-            chunk_size = min(max_diff_per_prompt, max(20, len(differences) // 2))
-            for i in range(0, len(differences), chunk_size):
-                chunk = differences[i:i+chunk_size]
-                prompts.append(create_single_format_prompt({section: chunk}))
-        # If adding this section would exceed our chunk size and we already have content
-        elif current_diff_count + len(differences) > max_diff_per_prompt and current_diff_count > 0:
-            # Create a prompt from current accumulated sections
-            prompts.append(create_single_format_prompt(current_sections))
-            current_sections = {section: differences}
-            current_diff_count = len(differences)
-        else:
-            # Add this section to current batch
-            current_sections[section] = differences
-            current_diff_count += len(differences)
+    # Add the last chunk if it's not empty
+    if current_chunk:
+        chunks.append(current_chunk)
     
-    # Add any remaining sections
-    if current_diff_count > 0:
-        prompts.append(create_single_format_prompt(current_sections))
-    
-    return prompts
+    return chunks
 
 @st.cache_data
-def generate_formatted_output(_section_differences, groq_api_key):
-    """Generate formatted output from section differences with improved structure"""
-    # Make a deep copy to avoid modifying the original
-    section_differences = _section_differences.copy()
+def direct_document_comparison(sections_data, groq_api_key):
+    """Compare document sections directly and generate formatted output"""
+    # Split sections into manageable chunks based on token count
+    section_chunks = chunk_sections_by_token_count(sections_data, max_tokens=6000)
+    st.info(f"Split comparison into {len(section_chunks)} chunks based on token limits")
     
-    # Generate prompts using the existing function
-    prompts = format_output_prompt(section_differences)
-    st.info(f"Generated {len(prompts)} processing chunks (optimized)")
+    all_results = []
     
-    all_formatted_outputs = []
-    
-    for i, prompt in enumerate(prompts):
-        st.text(f"Processing format chunk {i+1} of {len(prompts)}")
+    # Process each chunk
+    for i, chunk in enumerate(section_chunks):
+        st.text(f"Processing chunk {i+1} of {len(section_chunks)}")
         
+        # Create prompt for this chunk
+        prompt = create_direct_comparison_prompt(chunk)
+        
+        # Initialize LLM
         groq_llm = ChatGroq(
             api_key=groq_api_key,
             model_name="llama3-8b-8192",
-            max_tokens=1000
+            max_tokens=2000
         )
         
-        with st.spinner(f"Generating summarized output chunk {i+1}/{len(prompts)} with LLM..."):
-            response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
+        # Process with LLM
+        with st.spinner(f"Analyzing document differences (chunk {i+1}/{len(section_chunks)})..."):
+            try:
+                response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
+            except Exception as e:
+                st.error(f"LLM Processing Error in chunk {i+1}: {e}")
+                continue
         
         if not response.strip():
-            st.warning(f"Empty response from format LLM in chunk {i+1}.")
+            st.warning(f"Empty response from LLM for chunk {i+1}.")
             continue
         
+        # Parse response
         try:
-            # Process the JSON response
             response_text = response.strip()
+            # Handle potential JSON formatting issues
             import re
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 json_text = json_match.group(0)
-                formatted_output = json.loads(json_text)
+                chunk_results = json.loads(json_text)
             else:
                 try:
-                    formatted_output = json.loads(response_text)
+                    chunk_results = json.loads(response_text)
                 except:
                     import ast
                     try:
-                        formatted_output = ast.literal_eval(response_text)
+                        chunk_results = ast.literal_eval(response_text)
                     except:
-                        st.error(f"Could not parse response as JSON or Python literal in chunk {i+1}")
+                        st.error(f"Could not parse response as JSON in chunk {i+1}")
                         st.code(response)
-                        formatted_output = []
+                        chunk_results = []
             
-            # Standardize the keys to match exact screenshot format
-            for item in formatted_output:
-                # Create standardized dictionary with exact column names
-                standardized_item = {
-                    "Samples affected": item.get("samples_affected", item.get("Samples affected", "")),
-                    "Observation - Category": item.get("observation_category", item.get("Observation - Category", "")),
-                    "Page": item.get("page", item.get("Page", "")),
-                    "Sub-category of Observation": item.get("sub_category", item.get("Sub-category of Observation", ""))
-                }
-                all_formatted_outputs.append(standardized_item)
+            # Add results from this chunk
+            all_results.extend(chunk_results)
             
-            if i < len(prompts) - 1:
-                time.sleep(5)
+            # Add delay between chunks to avoid rate limiting
+            if i < len(section_chunks) - 1:
+                time.sleep(10)
                 
         except Exception as e:
-            st.error(f"Error parsing LLM format response in chunk {i+1}: {e}")
+            st.error(f"Error parsing LLM response in chunk {i+1}: {e}")
             st.code(response)
     
-    # Ensure we have exactly two categories as in the screenshot
-    required_categories = [
-        'Mismatch of content between Filed Copy and customer copy',
-        'Available in Filed Copy but missing in Customer Copy'
-    ]
-    
-    # Process into the final format
-    final_output = []
-    for category in required_categories:
-        matching_items = [item for item in all_formatted_outputs 
-                          if item.get('Observation - Category', '').lower() == category.lower()]
+    # Process results into final DataFrame
+    if all_results:
+        # Standardize column names
+        for result in all_results:
+            for key in list(result.keys()):
+                if key.lower() == "samples affected" or key.lower() == "samples_affected":
+                    result["Samples affected"] = result.pop(key)
+                elif key.lower() == "observation - category" or key.lower() == "observation_category":
+                    result["Observation - Category"] = result.pop(key)
+                elif key.lower() == "page":
+                    result["Page"] = result.pop(key)
+                elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
+                    result["Sub-category of Observation"] = result.pop(key)
         
-        if matching_items:
-            # Process pages separately to match the format in the screenshot
-            page_to_subcategories = {}
-            for item in matching_items:
-                # Fix for list object has no attribute 'split'
-                page_value = item.get('Page', '')
-                subcategory_value = item.get('Sub-category of Observation', '')
-                
-                # Handle different data types for Page field
-                if isinstance(page_value, list):
-                    pages = [p.strip() for p in page_value if p.strip()]
-                elif isinstance(page_value, str):
-                    pages = [p.strip() for p in page_value.split(';') if p.strip()]
-                else:
-                    pages = [str(page_value)]
-                
-                # Handle different data types for Sub-category field
-                if isinstance(subcategory_value, list):
-                    subcategories = [s.strip() for s in subcategory_value if s.strip()]
-                elif isinstance(subcategory_value, str):
-                    subcategories = [s.strip() for s in subcategory_value.split(';') if s.strip()]
-                else:
-                    subcategories = [str(subcategory_value)]
-                
-                # Match pages with subcategories
-                if not pages:  # If pages is empty, use a default
-                    pages = ["Unknown section"]
-                
-                for p in pages:
-                    if p not in page_to_subcategories:
-                        page_to_subcategories[p] = []
-                    
-                    # Find subcategories that match this page
-                    for sc in subcategories:
-                        if p.lower() in sc.lower() or not any(pg.lower() in sc.lower() for pg in pages):
-                            page_to_subcategories[p].append(sc)
-            
-            # Create separate row for each page
-            for page, subcats in page_to_subcategories.items():
-                final_output.append({
-                    'Samples affected': 'All Samples',  # Default value to ensure it's always set
-                    'Observation - Category': category,
-                    'Page': page,
-                    'Sub-category of Observation': '; '.join(set(subcats)) if subcats else ""
-                })
-        else:
-            # Create empty row for this category
-            final_output.append({
-                'Samples affected': 'All Samples',
-                'Observation - Category': category,
-                'Page': '',
-                'Sub-category of Observation': ''
-            })
-    
-    return final_output
+        # Create DataFrame
+        output_df = pd.DataFrame(all_results)
+        
+        # Ensure required columns exist
+        required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
+        for col in required_columns:
+            if col not in output_df.columns:
+                output_df[col] = ""
+        
+        # Reorder columns
+        output_df = output_df[required_columns]
+        
+        # Set default value for Samples affected
+        output_df["Samples affected"] = "All Samples"
+        
+        return output_df
+    else:
+        # Return empty DataFrame with required columns
+        return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
 
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
@@ -660,8 +400,8 @@ def save_uploaded_file(uploaded_file):
         return file_path
     return None
 
-def run_comparison(company_path, customer_path, checklist_path, groq_api_key):
-    """Run the comparison process in steps, with state tracking"""
+def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key):
+    """Run the simplified direct comparison process"""
     progress_container = st.empty()
     
     try:
@@ -688,13 +428,13 @@ def run_comparison(company_path, customer_path, checklist_path, groq_api_key):
             st.session_state.processing_step = "customer_faiss"
             st.success("✅ Customer document processed successfully")
 
-        # Step 4: Compare sections
+        # Step 4: Extract and compare sections (simplified)
         with progress_container.container():
-            st.subheader("Step 4: Comparing Sections")
-            final_rows = []
+            st.subheader("Step 4: Extracting Document Sections")
+            sections_data = {}
             
             for idx, row in checklist_df.iterrows():
-                section_name = row['PageName'].strip().lower()
+                section_name = row['PageName'].strip()
                 start_marker = preprocess_text(row['StartMarker'])
                 end_marker = preprocess_text(row['EndMarker'])
                 
@@ -707,114 +447,39 @@ def run_comparison(company_path, customer_path, checklist_path, groq_api_key):
                     st.warning(f"Could not retrieve sections for {section_name}")
                     continue
                 
-                company_lines = [line.strip() for line in split_text_into_lines(company_section[0]["text"]) if
-                               line.strip() and "[TABLE]" not in line]
-                customer_lines = [line.strip() for line in split_text_into_lines(customer_section[0]["text"]) if
-                                line.strip() and "[TABLE]" not in line]
-                
-                for comp_line in company_lines:
-                    best_cust_line = find_best_line_match(comp_line, customer_lines)
-                    final_rows.append({
-                        "Section": section_name,
-                        "CompanyLine": comp_line,
-                        "CustomerLine": best_cust_line
-                    })
+                # Store section text for direct comparison
+                sections_data[section_name] = {
+                    "company_text": company_section[0]["text"],
+                    "customer_text": customer_section[0]["text"]
+                }
             
-            df = pd.DataFrame(final_rows).drop_duplicates()
-            df["order"] = df.index
-            st.session_state.processing_step = "initial_comparison"
-            st.success("✅ Initial comparison completed")
+            st.session_state.processing_step = "extract_sections"
+            st.success(f"✅ Extracted {len(sections_data)} document sections")
 
-        # Step 5: Filter and analyze differences
+        # Step 5: Direct LLM comparison
         with progress_container.container():
-            st.subheader("Step 5: Filtering Similar and Different Rows")
+            st.subheader("Step 5: Analyzing Document Differences")
+            output_df = direct_document_comparison(sections_data, groq_api_key)
             
-            same_rows = []
-            different_rows = []
-            
-            for idx, row in df.iterrows():
-                norm_company = row["CompanyLine"].lower().replace(" ", "")
-                norm_customer = row["CustomerLine"].lower().replace(" ", "")
-                
-                if norm_company == norm_customer:
-                    same_rows.append({**row, "Comparison": "SAME"})
-                elif norm_company in norm_customer:
-                    same_rows.append({**row, "Comparison": "SAME"})
-                elif norm_customer == "":
-                    same_rows.append({**row, "Comparison": "DIFFERENT", 
-                                     "Difference": "Could not find similar line in customer document"})
-                else:
-                    different_rows.append(row)
-            
-            df_same = pd.DataFrame(same_rows) if same_rows else pd.DataFrame()
-            df_different = pd.DataFrame(different_rows) if different_rows else pd.DataFrame()
-            
-            st.text(f"Found {df_same.shape[0]} similar rows and {df_different.shape[0]} potentially different rows")
-            st.session_state.processing_step = "filtered_rows"
-            st.success("✅ Filtering completed")
-
-        # Step 6: Analyze differences with LLM
-        with progress_container.container():
-            st.subheader("Step 6: Analyzing Differences with LLM")
-            
-            if not df_different.empty:
-                st.text("Analyzing differences with LLM...")
-                df_diff_compared = compare_dataframe(df_different, groq_api_key, batch_size=10)
-            else:
-                df_diff_compared = df_different.copy()
-            
-            df_final = pd.concat([df_same, df_diff_compared]).sort_values("order") if not df_same.empty or not df_diff_compared.empty else pd.DataFrame()
-            if not df_final.empty:
-                df_final = df_final.drop(columns=["order"])
-            
-            st.session_state.final_df = df_final
-            st.session_state.processing_step = "difference_analysis"
-            st.success("✅ Difference analysis completed")
-
-        # Step 7: Format output
-        with progress_container.container():
-            st.subheader("Step 7: Generating Formatted Output")
-            
-            section_differences = {}
-            if not df_final.empty:
-                for idx, row in df_final[df_final["Comparison"] == "DIFFERENT"].iterrows():
-                    section = row["Section"]
-                    if section not in section_differences:
-                        section_differences[section] = []
-                    section_differences[section].append({
-                        "CompanyLine": row["CompanyLine"],
-                        "CustomerLine": row["CustomerLine"],
-                        "Difference": row["Difference"]
-                    })
-            
-            formatted_output = []
-            if section_differences:
-                st.text("Generating formatted output...")
-                formatted_output = generate_formatted_output(section_differences, groq_api_key)
-            
-            if formatted_output:
-                output_df = pd.DataFrame(formatted_output)
-                output_df.columns = [
-                    "Samples affected", 
-                    "Observation - Category", 
-                    "Page", 
-                    "Sub-category of Observation"
-                ]
-            else:
-                output_df = pd.DataFrame(columns=[
-                    "Samples affected", 
-                    "Observation - Category", 
-                    "Page", 
-                    "Sub-category of Observation"
-                ])
-            
+            # Store results in session state
             st.session_state.output_df = output_df
-            st.session_state.comparison_completed = True
+            
+            # Create a simple df for differences display
+            if not output_df.empty:
+                diff_count = len(output_df)
+                st.session_state.final_df = pd.DataFrame({
+                    "Section": output_df["Page"].tolist(),
+                    "Comparison": ["DIFFERENT"] * diff_count,
+                    "Difference": output_df["Sub-category of Observation"].tolist()
+                })
+            else:
+                st.session_state.final_df = pd.DataFrame(columns=["Section", "Comparison", "Difference"])
+                
             st.session_state.processing_step = "complete"
-            st.success("✅ Formatted output generated successfully")
+            st.session_state.comparison_completed = True
+            st.success("✅ Document analysis completed")
 
         progress_container.empty()
-        st.session_state.comparison_completed = True
         return True
         
     except Exception as e:
@@ -840,75 +505,60 @@ def display_results():
         df_final = st.session_state.final_df
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Total Lines", len(df_final))
-            st.metric("Similar Lines", len(df_final[df_final["Comparison"] == "SAME"]))
+            st.metric("Total Sections Analyzed", len(st.session_state.output_df) if not st.session_state.output_df.empty else 0)
         with col2:
-            st.metric("Different Lines", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
-            percentage_different = (len(df_final[df_final["Comparison"] == "DIFFERENT"]) / len(df_final) * 100) if len(df_final) > 0 else 0
-            st.metric("Difference Percentage", f"{percentage_different:.2f}%")
+            st.metric("Sections with Differences", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
         
-        # Display tabs for different views
-        tab1, tab2, tab3 = st.tabs(["All Comparisons", "Differences Only", "Formatted Output"])
-        
-        with tab1:
-            st.subheader("All Comparisons")
-            st.dataframe(df_final, use_container_width=True)
-        
-        with tab2:
-            st.subheader("Differences Only")
-            differences_df = df_final[df_final["Comparison"] == "DIFFERENT"].reset_index(drop=True)
-            st.dataframe(differences_df, use_container_width=True)
-        
-        with tab3:
-            st.subheader("Formatted Output")
-            if st.session_state.output_df is not None and not st.session_state.output_df.empty:
-                # Apply custom formatting to match screenshot
-                st.markdown("""
-                <style>
-                .comparison-table {
-                    width: 100%;
-                    text-align: left;
-                    border-collapse: collapse;
-                }
-                .comparison-table th {
-                    background-color: #87CEEB;
-                    color: black;
-                    font-weight: bold;
-                    padding: 8px;
-                    border: 1px solid #ddd;
-                }
-                .comparison-table td {
-                    padding: 8px;
-                    border: 1px solid #ddd;
-                }
-                .comparison-table tr:nth-child(even) {
-                    background-color: #f9f9f9;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-                
-                # Convert DataFrame to HTML table with styled classes
-                html_table = st.session_state.output_df.to_html(
-                    classes="comparison-table", 
-                    index=False,
-                    escape=False
-                )
-                st.markdown(html_table, unsafe_allow_html=True)
-                
-                # Add download button for Excel export
-                from io import BytesIO
-                buffer = BytesIO()
-                st.session_state.output_df.to_excel(buffer, index=False)
-                buffer.seek(0)
-                
-                st.download_button(
-                    label="Download Formatted Report",
-                    data=buffer,
-                    file_name="document_comparison_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("No differences found that require formatting.")
+        # Display formatted output
+        st.subheader("Comparison Report")
+        if st.session_state.output_df is not None and not st.session_state.output_df.empty:
+            # Apply custom formatting to match screenshot
+            st.markdown("""
+            <style>
+            .comparison-table {
+                width: 100%;
+                text-align: left;
+                border-collapse: collapse;
+            }
+            .comparison-table th {
+                background-color: #87CEEB;
+                color: black;
+                font-weight: bold;
+                padding: 8px;
+                border: 1px solid #ddd;
+            }
+            .comparison-table td {
+                padding: 8px;
+                border: 1px solid #ddd;
+            }
+            .comparison-table tr:nth-child(even) {
+                background-color: #f9f9f9;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # Convert DataFrame to HTML table with styled classes
+            html_table = st.session_state.output_df.to_html(
+                classes="comparison-table", 
+                index=False,
+                escape=False
+            )
+            st.markdown(html_table, unsafe_allow_html=True)
+            
+            # Add download button for Excel export
+            from io import BytesIO
+            buffer = BytesIO()
+            st.session_state.output_df.to_excel(buffer, index=False)
+            buffer.seek(0)
+            
+            st.download_button(
+                label="Download Comparison Report",
+                data=buffer,
+                file_name="document_comparison_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No differences found between the documents.")
     else:
         st.info("No comparison results available yet. Please run a comparison first.")
 
@@ -922,12 +572,12 @@ def main():
         1. Upload the company document (DOCX format)
         2. Upload the customer document (DOCX format) 
         3. Upload the checklist Excel file
-        4. Enter your OpenAI API key
+        4. Enter your Groq API key
         5. Click "Run Comparison"
         
         ### About the Tool
         This tool compares two documents section by section based on the checklist provided.
-        It identifies differences between the documents and categorizes them for easy review.
+        It uses AI to identify differences between the documents and categorizes them for easy review.
         """)
     
     # File uploads
@@ -940,7 +590,7 @@ def main():
     checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
     
     # API key input
-    groq_api_key = st.text_input("Enter OpenAI API Key", type="password")
+    groq_api_key = st.text_input("Enter Groq API Key", type="password")
     
     # Run comparison button
     if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and groq_api_key)):
@@ -950,8 +600,8 @@ def main():
             customer_path = save_uploaded_file(customer_file)
             checklist_path = save_uploaded_file(checklist_file)
             
-            # Run comparison
-            success = run_comparison(company_path, customer_path, checklist_path, groq_api_key)
+            # Run direct comparison
+            success = run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key)
             
             if success:
                 st.success("Comparison completed successfully!")
