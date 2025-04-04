@@ -429,7 +429,8 @@ def create_single_format_prompt(section_differences):
         "1. 'Mismatch of content between Filed Copy and customer copy'\n"
         "2. 'Available in Filed Copy but missing in Customer Copy'\n\n"
         
-        "For each row:\n"
+        "For each category row:\n"
+        "- Group ALL affected pages under the same category into a SINGLE ROW\n"
         "- In the 'Page' column, list ALL affected pages/sections separated by rows\n"
         "- In the 'Sub-category of Observation' column, list ALL issues in a summarized format for that category separated by lines\n"
         "- Use 'All Samples' for the 'Samples affected' column\n\n"
