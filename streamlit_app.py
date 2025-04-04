@@ -208,6 +208,14 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
             })
     return matching_sections
 
+def extract_customer_number(filename):
+    # Extract the part before first underscore
+    if '__' in filename:
+        number_part = filename.split('__')[0]
+        return number_part
+    # Fallback - just return the filename without extension
+    return os.path.splitext(filename)[0]
+
 def create_direct_comparison_prompt(sections_data):
     """Create a prompt for direct comparison of document sections"""
     prompt = (
@@ -215,7 +223,7 @@ def create_direct_comparison_prompt(sections_data):
         "and produce a consolidated report. The format of your response is critical.\n\n"
         
         "IMPORTANT: Create a table with EXACTLY these column headers:\n"
-        "1. 'Samples affected' - Should always be set to the number mentioned in the input customer document name\n"
+        "1. 'Samples affected' - Should always be '{customer_number}'\n"
         "2. 'Observation - Category' - Must be one of these two categories:\n"
         "   - 'Mismatch of content between Filed Copy and customer copy'\n"
         "   - 'Available in Filed Copy but missing in Customer Copy'\n"
@@ -253,7 +261,7 @@ def create_direct_comparison_prompt(sections_data):
         "   Under 'Available in Filed Copy but missing in Customer Copy', pointers for availability of information in Filed copy and unavailability of the same in Customer copy.\n\n"
         
         "Return your analysis as a JSON array where each object has these keys:\n"
-        "- 'Samples affected': Always set to the number mentioned in the input customer document name\n"
+        "- 'Samples affected': Always set to '{customer_number}'\n"
         "- 'Observation - Category': One of the two categories listed above\n"
         "- 'Page': One of the page categories mentioned above\n"
         "- 'Sub-category of Observation': Comprehensive summary of ALL differences for that page\n\n"
@@ -351,7 +359,7 @@ def organize_comparison_results(output_df):
     return sorted_df
 
 @st.cache_data
-def direct_document_comparison(sections_data, groq_api_key):
+def direct_document_comparison(sections_data, groq_api_key, customer_number="All Samples"):
     """Compare document sections directly and generate formatted output"""
     # Split sections into manageable chunks based on token count
     section_chunks = chunk_sections_by_token_count(sections_data, max_tokens=6000)
@@ -364,7 +372,7 @@ def direct_document_comparison(sections_data, groq_api_key):
         st.text(f"Processing chunk {i+1} of {len(section_chunks)}")
         
         # Create prompt for this chunk
-        prompt = create_direct_comparison_prompt(chunk)
+        prompt = create_direct_comparison_prompt(chunk, customer_number)
         
         # Initialize LLM
         groq_llm = ChatGroq(
@@ -419,6 +427,7 @@ def direct_document_comparison(sections_data, groq_api_key):
     
     # Process results into final DataFrame
     if all_results:
+        output_df["Samples affected"] = customer_number
     # Standardize column names
         for result in all_results:
             for key in list(result.keys()):
@@ -467,6 +476,10 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
     progress_container = st.empty()
     
     try:
+        # Extract customer number from filename
+        customer_filename = os.path.basename(customer_path)
+        customer_number = extract_customer_number(customer_filename)
+        
         # Step 1: Load checklist
         with progress_container.container():
             st.subheader("Step 1: Loading Checklist")
@@ -518,10 +531,10 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
             st.session_state.processing_step = "extract_sections"
             st.success(f"✅ Extracted {len(sections_data)} document sections")
 
-        # Step 5: Direct LLM comparison
+        # Step 5: Direct LLM comparison - pass customer number
         with progress_container.container():
             st.subheader("Step 5: Analyzing Document Differences")
-            output_df = direct_document_comparison(sections_data, groq_api_key)
+            output_df = direct_document_comparison(sections_data, groq_api_key, customer_number)
             output_df = organize_comparison_results(output_df)
             # Store results in session state
             st.session_state.output_df = output_df
