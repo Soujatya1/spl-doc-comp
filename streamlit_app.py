@@ -216,7 +216,7 @@ def extract_customer_number(filename):
     # Fallback - just return the filename without extension
     return os.path.splitext(filename)[0]
 
-def create_direct_comparison_prompt(sections_data):
+def create_direct_comparison_prompt(sections_data, customer_number="All Samples"):
     """Create a prompt for direct comparison of document sections"""
     prompt = (
         "You are a document comparison expert. You will analyze differences between company and customer document sections "
