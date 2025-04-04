@@ -425,10 +425,12 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
             st.error(f"Error parsing LLM response in chunk {i+1}: {e}")
             st.code(response)
     
+    # Initialize output_df first
+    output_df = pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
+    
     # Process results into final DataFrame
     if all_results:
-        output_df["Samples affected"] = customer_number
-    # Standardize column names
+        # Standardize column names
         for result in all_results:
             for key in list(result.keys()):
                 if key.lower() == "samples affected" or key.lower() == "samples_affected":
@@ -440,28 +442,25 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                 elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
                     result["Sub-category of Observation"] = result.pop(key)
     
-    # Create DataFrame
+        # Create DataFrame
         output_df = pd.DataFrame(all_results)
     
-    # Ensure required columns exist
+        # Ensure required columns exist
         required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
         for col in required_columns:
             if col not in output_df.columns:
                 output_df[col] = ""
     
-    # Reorder columns
+        # Reorder columns
         output_df = output_df[required_columns]
     
-    # Set default value for Samples affected
-        output_df["Samples affected"] = "All Samples"
+        # Set default value for Samples affected
+        output_df["Samples affected"] = customer_number
     
-    # Organize results by category and page
+        # Organize results by category and page
         output_df = organize_comparison_results(output_df)
     
-        return output_df
-    else:
-    # Return empty DataFrame with required columns
-        return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
+    return output_df
 
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
