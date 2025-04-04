@@ -515,7 +515,7 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
         with progress_container.container():
             st.subheader("Step 5: Analyzing Document Differences")
             output_df = direct_document_comparison(sections_data, groq_api_key)
-            
+            output_df = organize_comparison_results(output_df)
             # Store results in session state
             st.session_state.output_df = output_df
             
