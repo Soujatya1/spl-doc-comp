@@ -466,9 +466,20 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
         # Group by category and page, then aggregate observations
         aggregated_results = []
         
-        for category in temp_df["Observation - Category"].unique():
+        # Make sure both categories are represented in output
+        category_order = [
+            "Mismatch of content between Filed Copy and customer copy",
+            "Available in Filed Copy but missing in Customer Copy"
+        ]
+        
+        # Process each category separately to ensure none are missed
+        for category in category_order:
             category_df = temp_df[temp_df["Observation - Category"] == category]
             
+            # If this category doesn't exist in the results, continue to next one
+            if category_df.empty:
+                continue
+                
             for page in category_df["Page"].unique():
                 page_rows = category_df[category_df["Page"] == page]
                 
@@ -500,10 +511,11 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
         output_df = pd.DataFrame(aggregated_results)
         
         # Reorder columns
-        output_df = output_df[required_columns]
+        if not output_df.empty:
+            output_df = output_df[required_columns]
     
-        # Organize results by category and page
-        output_df = organize_comparison_results(output_df)
+            # Organize results by category and page
+            output_df = organize_comparison_results(output_df)
     
         return output_df
     else:
@@ -583,7 +595,32 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
         with progress_container.container():
             st.subheader("Step 5: Analyzing Document Differences")
             output_df = direct_document_comparison(sections_data, groq_api_key, customer_number)
+            
+            # Make sure output_df has both category types if it's not empty
+            if not output_df.empty:
+                category_order = [
+                    "Mismatch of content between Filed Copy and customer copy",
+                    "Available in Filed Copy but missing in Customer Copy"
+                ]
+                
+                # Check if each category exists and add placeholder rows if not
+                for category in category_order:
+                    if category not in output_df["Observation - Category"].values:
+                        # Add an empty placeholder for this category to ensure it's represented
+                        placeholder_row = {
+                            "Samples affected": customer_number,
+                            "Observation - Category": category,
+                            "Page": "",
+                            "Sub-category of Observation": ""
+                        }
+                        placeholder_df = pd.DataFrame([placeholder_row])
+                        output_df = pd.concat([output_df, placeholder_df], ignore_index=True)
+                
+                # Then remove any empty rows (after ensuring categories are preserved)
+                output_df = output_df[output_df["Page"] != ""]
+            
             output_df = organize_comparison_results(output_df)
+            
             # Store results in session state
             st.session_state.output_df = output_df
             
