@@ -425,9 +425,6 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
             st.error(f"Error parsing LLM response in chunk {i+1}: {e}")
             st.code(response)
     
-    # Initialize output_df first
-    output_df = pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-    
     # Process results into final DataFrame
     if all_results:
         # Standardize column names
@@ -460,7 +457,10 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
         # Organize results by category and page
         output_df = organize_comparison_results(output_df)
     
-    return output_df
+        return output_df
+    else:
+        # Return empty DataFrame with required columns
+        return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
 
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
