@@ -354,12 +354,6 @@ def organize_comparison_results(output_df):
         "Preamble"
     ]
     
-    # Print diagnostics to verify category data
-    st.write(f"Categories found: {output_df['Observation - Category'].unique()}")
-    for category in category_order:
-        category_count = len(output_df[output_df['Observation - Category'] == category])
-        st.write(f"Category '{category}' has {category_count} rows")
-    
     # Create category and page ordering for sorting
     output_df['category_order'] = output_df['Observation - Category'].apply(
         lambda x: category_order.index(x) if x in category_order else 999
@@ -434,48 +428,6 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                         st.code(response)
                         chunk_results = []
             
-            # Standardize category and page names for consistent matching
-            for result in chunk_results:
-                # Standardize observation category field name
-                category_key = None
-                for key in result.keys():
-                    if "category" in key.lower() or "observation" in key.lower():
-                        category_key = key
-                        break
-                
-                if category_key:
-                    category_value = result[category_key]
-                    # Standardize category values
-                    if "mismatch" in category_value.lower():
-                        result[category_key] = "Mismatch of content between Filed Copy and customer copy"
-                    elif "available" in category_value.lower() or "missing" in category_value.lower():
-                        result[category_key] = "Available in Filed Copy but missing in Customer Copy"
-                
-                # Standardize page field name
-                page_key = None
-                for key in result.keys():
-                    if "page" in key.lower():
-                        page_key = key
-                        break
-                
-                if page_key:
-                    page_value = result[page_key].strip()
-                    # Map to standard page names
-                    if "forwarding" in page_value.lower():
-                        result[page_key] = "Forwarding Letter"
-                    elif "schedule" in page_value.lower():
-                        result[page_key] = "Schedule"
-                    elif "terms" in page_value.lower() or "condition" in page_value.lower():
-                        result[page_key] = "Terms and conditions"
-                    elif "ombudsman" in page_value.lower():
-                        result[page_key] = "Ombudsman Page"
-                    elif "annexure aa" in page_value.lower():
-                        result[page_key] = "Annexure AA"
-                    elif "annexure 1" in page_value.lower():
-                        result[page_key] = "Annexure 1"
-                    elif "preamble" in page_value.lower():
-                        result[page_key] = "Preamble"
-            
             # Add results from this chunk
             all_results.extend(chunk_results)
             
@@ -489,9 +441,6 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
     
     # Process results into final DataFrame
     if all_results:
-        # Print diagnostic info
-        st.text(f"Total results before processing: {len(all_results)}")
-        
         # Standardize column names
         for result in all_results:
             for key in list(result.keys()):
@@ -503,93 +452,64 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                     result["Page"] = result.pop(key)
                 elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
                     result["Sub-category of Observation"] = result.pop(key)
+    
+        # Create DataFrame
+        temp_df = pd.DataFrame(all_results)
+    
+        # Ensure required columns exist
+        required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
+        for col in required_columns:
+            if col not in temp_df.columns:
+                temp_df[col] = ""
         
-        # Group results by category and page to avoid duplicates while preserving all unique pages
-        grouped_results = {}
-        for result in all_results:
-            # Ensure all required keys exist
-            if "Observation - Category" not in result or "Page" not in result:
-                continue
+        # Collate observations for the same page under each category
+        # Group by category and page, then aggregate observations
+        aggregated_results = []
+        
+        for category in temp_df["Observation - Category"].unique():
+            category_df = temp_df[temp_df["Observation - Category"] == category]
+            
+            for page in category_df["Page"].unique():
+                page_rows = category_df[category_df["Page"] == page]
                 
-            key = (result["Observation - Category"], result["Page"])
-            if key not in grouped_results:
-                # Initialize with required fields if missing
-                for field in ["Samples affected", "Sub-category of Observation"]:
-                    if field not in result:
-                        result[field] = ""
-                grouped_results[key] = result
-            else:
-                # Combine observations for duplicate category-page pairs
-                existing = grouped_results[key]["Sub-category of Observation"]
-                new = result.get("Sub-category of Observation", "")
+                # Combine all observations for this page
+                all_observations = []
+                for idx, row in page_rows.iterrows():
+                    observation = row["Sub-category of Observation"]
+                    if observation not in all_observations:  # Avoid duplicates
+                        all_observations.append(observation)
                 
-                # Ensure we don't duplicate observations
-                if new and new not in existing:
-                    if existing:
-                        grouped_results[key]["Sub-category of Observation"] = existing + "\n" + new
+                # Format the combined observations as a numbered list
+                combined_observations = ""
+                for i, obs in enumerate(all_observations, 1):
+                    # Check if the observation already starts with a number
+                    if not re.match(r'^\d+\.', obs.strip()):
+                        combined_observations += f"{i}. {obs}\n"
                     else:
-                        grouped_results[key]["Sub-category of Observation"] = new
-        
-        # Convert back to list
-        aggregated_results = list(grouped_results.values())
-        
-        # Print diagnostic info
-        st.text(f"Total results after grouping: {len(aggregated_results)}")
+                        combined_observations += f"{obs}\n"
+                
+                # Create aggregated result
+                aggregated_results.append({
+                    "Samples affected": customer_number,
+                    "Observation - Category": category,
+                    "Page": page,
+                    "Sub-category of Observation": combined_observations.strip()
+                })
         
         # Create output DataFrame from aggregated results
         output_df = pd.DataFrame(aggregated_results)
         
-        # Ensure required columns exist
-        required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
-        for col in required_columns:
-            if col not in output_df.columns:
-                output_df[col] = ""
-        
-        # Format observations as numbered lists if they aren't already
-        def format_observations(obs_text):
-            if not obs_text:
-                return ""
-            
-            lines = obs_text.split('\n')
-            formatted_lines = []
-            
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Check if line already starts with a number
-                if not re.match(r'^\d+\.', line):
-                    formatted_lines.append(f"{i+1}. {line}")
-                else:
-                    formatted_lines.append(line)
-                    
-            return "\n".join(formatted_lines)
-        
-        output_df["Sub-category of Observation"] = output_df["Sub-category of Observation"].apply(format_observations)
-        
-        # Set customer number if missing
-        output_df["Samples affected"] = output_df["Samples affected"].apply(
-            lambda x: customer_number if not x else x
-        )
-        
         # Reorder columns
         output_df = output_df[required_columns]
-        
-        # Print diagnostic info about categories
-        category_counts = output_df["Observation - Category"].value_counts().to_dict()
-        st.text("Categories found:")
-        for cat, count in category_counts.items():
-            st.text(f"  - {cat}: {count} rows")
     
         # Organize results by category and page
         output_df = organize_comparison_results(output_df)
-        
+    
         return output_df
     else:
         # Return empty DataFrame with required columns
         return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-        
+
 def save_uploaded_file(uploaded_file):
     if uploaded_file is not None:
         file_path = os.path.join(temp_dir, uploaded_file.name)
