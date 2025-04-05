@@ -23,10 +23,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-# Configure page settings
 st.set_page_config(page_title="Document Comparison Tool", layout="wide")
 
-# Initialize session state for key variables
 if 'comparison_completed' not in st.session_state:
     st.session_state.comparison_completed = False
 if 'company_faiss' not in st.session_state:
@@ -209,11 +207,9 @@ def retrieve_section(page_name, start_marker, end_marker, faiss_index):
     return matching_sections
 
 def extract_customer_number(filename):
-    # Extract the part before first underscore
     if '__' in filename:
         number_part = filename.split('__')[0]
         return number_part
-    # Fallback - just return the filename without extension
     return os.path.splitext(filename)[0]
 
 def create_direct_comparison_prompt(sections_data, customer_number="All Samples"):
@@ -244,7 +240,6 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
         "Here are the sections to compare:\n\n"
     )
     
-    # Add each section's content for comparison
     for section_name, data in sections_data.items():
         prompt += f"SECTION: {section_name}\n"
         prompt += f"COMPANY VERSION:\n{truncate_text(data['company_text'], 500)}\n\n"
@@ -297,17 +292,14 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
     return prompt
 
 def chunk_sections_by_token_count(sections_data, max_tokens=6000):
-    """Split sections into chunks based on token count for processing"""
     chunks = []
     current_chunk = {}
     current_tokens = 0
     
     for section_name, data in sections_data.items():
-        # Calculate tokens for this section
         section_text = f"SECTION: {section_name}\nCOMPANY VERSION:\n{data['company_text']}\n\nCUSTOMER VERSION:\n{data['customer_text']}\n\n"
         section_tokens = count_tokens(section_text)
         
-        # If this single section exceeds max tokens, truncate it
         if section_tokens > max_tokens:
             data_copy = data.copy()
             data_copy['company_text'] = truncate_text(data['company_text'], max_tokens // 2)
@@ -316,34 +308,28 @@ def chunk_sections_by_token_count(sections_data, max_tokens=6000):
             section_tokens = count_tokens(truncated_section_text)
             data = data_copy
         
-        # If adding this section would exceed the token limit, start a new chunk
         if current_tokens + section_tokens > max_tokens and current_chunk:
             chunks.append(current_chunk)
             current_chunk = {}
             current_tokens = 0
         
-        # Add section to current chunk
         current_chunk[section_name] = data
         current_tokens += section_tokens
     
-    # Add the last chunk if it's not empty
     if current_chunk:
         chunks.append(current_chunk)
     
     return chunks
 
 def organize_comparison_results(output_df):
-    """Organize comparison results by category and page"""
     if output_df.empty:
         return output_df
         
-    # Define the order of categories
     category_order = [
         "Mismatch of content between Filed Copy and customer copy",
         "Available in Filed Copy but missing in Customer Copy"
     ]
     
-    # Define the order of pages
     page_order = [
         "Forwarding Letter", 
         "Schedule", 
@@ -354,48 +340,38 @@ def organize_comparison_results(output_df):
         "Preamble"
     ]
     
-    # Create category and page ordering for sorting
     output_df['category_order'] = output_df['Observation - Category'].apply(
         lambda x: category_order.index(x) if x in category_order else 999
     )
     
-    # Create page ordering
     output_df['page_order'] = output_df['Page'].apply(
         lambda x: page_order.index(x) if x in page_order else 999
     )
     
-    # Sort by category first, then by page
     sorted_df = output_df.sort_values(['category_order', 'page_order'])
     
-    # Drop temporary columns
     sorted_df = sorted_df.drop(['category_order', 'page_order'], axis=1)
     
     return sorted_df
 
 @st.cache_data
 def direct_document_comparison(sections_data, groq_api_key, customer_number="All Samples"):
-    """Compare document sections directly and generate formatted output"""
-    # Split sections into manageable chunks based on token count
     section_chunks = chunk_sections_by_token_count(sections_data, max_tokens=6000)
     st.info(f"Split comparison into {len(section_chunks)} chunks based on token limits")
     
     all_results = []
     
-    # Process each chunk
     for i, chunk in enumerate(section_chunks):
         st.text(f"Processing chunk {i+1} of {len(section_chunks)}")
         
-        # Create prompt for this chunk
         prompt = create_direct_comparison_prompt(chunk, customer_number)
         
-        # Initialize LLM
         groq_llm = ChatGroq(
             api_key=groq_api_key,
             model_name="llama3-8b-8192",
             max_tokens=2000
         )
         
-        # Process with LLM
         with st.spinner(f"Analyzing document differences (chunk {i+1}/{len(section_chunks)})..."):
             try:
                 response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
@@ -407,10 +383,8 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
             st.warning(f"Empty response from LLM for chunk {i+1}.")
             continue
         
-        # Parse response
         try:
             response_text = response.strip()
-            # Handle potential JSON formatting issues
             import re
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
@@ -428,10 +402,8 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                         st.code(response)
                         chunk_results = []
             
-            # Add results from this chunk
             all_results.extend(chunk_results)
             
-            # Add delay between chunks to avoid rate limiting
             if i < len(section_chunks) - 1:
                 time.sleep(10)
                 
@@ -439,9 +411,7 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
             st.error(f"Error parsing LLM response in chunk {i+1}: {e}")
             st.code(response)
     
-    # Process results into final DataFrame
     if all_results:
-        # Standardize column names
         for result in all_results:
             for key in list(result.keys()):
                 if key.lower() == "samples affected" or key.lower() == "samples_affected":
@@ -453,53 +423,42 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                 elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
                     result["Sub-category of Observation"] = result.pop(key)
     
-        # Create DataFrame
         temp_df = pd.DataFrame(all_results)
     
-        # Ensure required columns exist
         required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
         for col in required_columns:
             if col not in temp_df.columns:
                 temp_df[col] = ""
         
-        # Collate observations for the same page under each category
-        # Group by category and page, then aggregate observations
         aggregated_results = []
         
-        # Make sure both categories are represented in output
         category_order = [
             "Mismatch of content between Filed Copy and customer copy",
             "Available in Filed Copy but missing in Customer Copy"
         ]
         
-        # Process each category separately to ensure none are missed
         for category in category_order:
             category_df = temp_df[temp_df["Observation - Category"] == category]
             
-            # If this category doesn't exist in the results, continue to next one
             if category_df.empty:
                 continue
                 
             for page in category_df["Page"].unique():
                 page_rows = category_df[category_df["Page"] == page]
                 
-                # Combine all observations for this page
                 all_observations = []
                 for idx, row in page_rows.iterrows():
                     observation = row["Sub-category of Observation"]
-                    if observation not in all_observations:  # Avoid duplicates
+                    if observation not in all_observations:
                         all_observations.append(observation)
                 
-                # Format the combined observations as a numbered list
                 combined_observations = ""
                 for i, obs in enumerate(all_observations, 1):
-                    # Check if the observation already starts with a number
                     if not re.match(r'^\d+\.', obs.strip()):
                         combined_observations += f"{i}. {obs}\n"
                     else:
                         combined_observations += f"{obs}\n"
                 
-                # Create aggregated result
                 aggregated_results.append({
                     "Samples affected": customer_number,
                     "Observation - Category": category,
@@ -507,19 +466,15 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                     "Sub-category of Observation": combined_observations.strip()
                 })
         
-        # Create output DataFrame from aggregated results
         output_df = pd.DataFrame(aggregated_results)
         
-        # Reorder columns
         if not output_df.empty:
             output_df = output_df[required_columns]
     
-            # Organize results by category and page
             output_df = organize_comparison_results(output_df)
     
         return output_df
     else:
-        # Return empty DataFrame with required columns
         return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
 
 def save_uploaded_file(uploaded_file):
@@ -531,23 +486,19 @@ def save_uploaded_file(uploaded_file):
     return None
 
 def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key):
-    """Run the simplified direct comparison process"""
     progress_container = st.empty()
-    output_df = None  # Initialize output_df at the function scope level
+    output_df = None
     
     try:
-        # Extract customer number from filename
         customer_filename = os.path.basename(customer_path)
         customer_number = extract_customer_number(customer_filename)
         
-        # Step 1: Load checklist
         with progress_container.container():
             st.subheader("Step 1: Loading Checklist")
             checklist_df = pd.read_excel(checklist_path)
             st.session_state.processing_step = "load_checklist"
             st.success("✅ Checklist loaded successfully")
 
-        # Step 2: Process company document
         with progress_container.container():
             st.subheader("Step 2: Processing Company Document")
             st.text("Storing company sections...")
@@ -555,7 +506,6 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
             st.session_state.processing_step = "company_faiss"
             st.success("✅ Company document processed successfully")
 
-        # Step 3: Process customer document
         with progress_container.container():
             st.subheader("Step 3: Processing Customer Document")
             st.text("Storing customer sections...")
@@ -563,7 +513,6 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
             st.session_state.processing_step = "customer_faiss"
             st.success("✅ Customer document processed successfully")
 
-        # Step 4: Extract and compare sections (simplified)
         with progress_container.container():
             st.subheader("Step 4: Extracting Document Sections")
             sections_data = {}
@@ -582,7 +531,6 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
                     st.warning(f"Could not retrieve sections for {section_name}")
                     continue
                 
-                # Store section text for direct comparison
                 sections_data[section_name] = {
                     "company_text": company_section[0]["text"],
                     "customer_text": customer_section[0]["text"]
@@ -591,22 +539,18 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
             st.session_state.processing_step = "extract_sections"
             st.success(f"✅ Extracted {len(sections_data)} document sections")
 
-        # Step 5: Direct LLM comparison - pass customer number
         with progress_container.container():
             st.subheader("Step 5: Analyzing Document Differences")
             output_df = direct_document_comparison(sections_data, groq_api_key, customer_number)
             
-            # Make sure output_df has both category types if it's not empty
             if not output_df.empty:
                 category_order = [
                     "Mismatch of content between Filed Copy and customer copy",
                     "Available in Filed Copy but missing in Customer Copy"
                 ]
                 
-                # Check if each category exists and add placeholder rows if not
                 for category in category_order:
                     if category not in output_df["Observation - Category"].values:
-                        # Add an empty placeholder for this category to ensure it's represented
                         placeholder_row = {
                             "Samples affected": customer_number,
                             "Observation - Category": category,
@@ -616,15 +560,12 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
                         placeholder_df = pd.DataFrame([placeholder_row])
                         output_df = pd.concat([output_df, placeholder_df], ignore_index=True)
                 
-                # Then remove any empty rows (after ensuring categories are preserved)
                 output_df = output_df[output_df["Page"] != ""]
             
             output_df = organize_comparison_results(output_df)
             
-            # Store results in session state
             st.session_state.output_df = output_df
             
-            # Create a simple df for differences display
             if not output_df.empty:
                 diff_count = len(output_df)
                 st.session_state.final_df = pd.DataFrame({
@@ -643,7 +584,6 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
         return True
         
     except Exception as e:
-        # Make sure we still have access to output_df in case of error
         if output_df is not None:
             st.session_state.output_df = output_df
         
@@ -653,11 +593,9 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
         return False
 
 def display_results():
-    """Display the comparison results with better formatting"""
     st.header("Document Comparison Results")
     
     if st.session_state.comparison_completed:
-        # Add a button to start a new comparison
         if st.button("Start New Comparison"):
             st.session_state.comparison_completed = False
             st.session_state.final_df = None
@@ -665,18 +603,15 @@ def display_results():
             st.rerun()
     
     if st.session_state.final_df is not None:
-        # Display metrics
         df_final = st.session_state.final_df
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Total Sections Analyzed", len(st.session_state.output_df) if not st.session_state.output_df.empty else 0)
+            st.metric("Sections Analyzed")
         with col2:
-            st.metric("Sections with Differences", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
+            st.metric("Sections with Differences Analyzed")
         
-        # Display formatted output
         st.subheader("Comparison Report")
         if st.session_state.output_df is not None and not st.session_state.output_df.empty:
-            # Apply custom formatting to match screenshot
             st.markdown("""
             <style>
             .comparison-table {
@@ -701,7 +636,6 @@ def display_results():
             </style>
             """, unsafe_allow_html=True)
             
-            # Convert DataFrame to HTML table with styled classes
             html_table = st.session_state.output_df.to_html(
                 classes="comparison-table", 
                 index=False,
@@ -709,19 +643,16 @@ def display_results():
             )
             st.markdown(html_table, unsafe_allow_html=True)
             
-            # Add download button for Excel export with merged cells
             from io import BytesIO
             from openpyxl import Workbook
             from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
             
             buffer = BytesIO()
             
-            # Create a workbook and select the active worksheet
             wb = Workbook()
             ws = wb.active
             ws.title = "Comparison Report"
             
-            # Add headers
             headers = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
             for col_idx, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col_idx)
@@ -736,19 +667,16 @@ def display_results():
                     bottom=Side(style="thin")
                 )
             
-            # Add data rows
             df = st.session_state.output_df
             current_category = None
             category_start_row = 2
             row_idx = 2
             
-            # Group by Observation Category
             for category in df['Observation - Category'].unique():
                 category_df = df[df['Observation - Category'] == category]
                 category_start_row = row_idx
                 
                 for _, row_data in category_df.iterrows():
-                    # Samples affected column
                     cell = ws.cell(row=row_idx, column=1)
                     cell.value = row_data["Samples affected"]
                     cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -759,7 +687,6 @@ def display_results():
                         bottom=Side(style="thin")
                     )
                     
-                    # Observation - Category column (will be merged later)
                     cell = ws.cell(row=row_idx, column=2)
                     cell.value = category if row_idx == category_start_row else None
                     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -770,7 +697,6 @@ def display_results():
                         bottom=Side(style="thin")
                     )
                     
-                    # Page column
                     cell = ws.cell(row=row_idx, column=3)
                     cell.value = row_data["Page"]
                     cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -781,7 +707,6 @@ def display_results():
                         bottom=Side(style="thin")
                     )
                     
-                    # Sub-category column
                     cell = ws.cell(row=row_idx, column=4)
                     cell.value = row_data["Sub-category of Observation"]
                     cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -794,17 +719,14 @@ def display_results():
                     
                     row_idx += 1
                 
-                # Merge cells for the category if there are multiple rows
                 if row_idx > category_start_row + 1:
                     ws.merge_cells(start_row=category_start_row, start_column=2, end_row=row_idx-1, end_column=2)
             
-            # Adjust column widths
             ws.column_dimensions['A'].width = 15
             ws.column_dimensions['B'].width = 40
             ws.column_dimensions['C'].width = 20
             ws.column_dimensions['D'].width = 60
             
-            # Save the workbook to buffer
             wb.save(buffer)
             buffer.seek(0)
             
@@ -822,7 +744,6 @@ def display_results():
 def main():
     st.title("Document Comparison Tool")
     
-    # Instructions
     with st.expander("How to Use"):
         st.markdown("""
         ### Instructions
@@ -837,7 +758,6 @@ def main():
         It uses AI to identify differences between the documents and categorizes them for easy review.
         """)
     
-    # File uploads
     col1, col2 = st.columns(2)
     with col1:
         company_file = st.file_uploader("Upload Company Document (DOCX)", type=["docx"])
@@ -846,18 +766,14 @@ def main():
     
     checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
     
-    # API key input
     groq_api_key = st.text_input("Enter Groq API Key", type="password")
     
-    # Run comparison button
     if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and groq_api_key)):
         with st.spinner("Processing..."):
-            # Save uploaded files to temp directory
             company_path = save_uploaded_file(company_file)
             customer_path = save_uploaded_file(customer_file)
             checklist_path = save_uploaded_file(checklist_file)
             
-            # Run direct comparison
             success = run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key)
             
             if success:
@@ -865,7 +781,6 @@ def main():
             else:
                 st.error("Comparison failed. Check logs for details.")
     
-    # Display results if comparison is completed
     if st.session_state.comparison_completed:
         display_results()
 
