@@ -605,9 +605,9 @@ def display_results():
     if st.session_state.final_df is not None:
         df_final = st.session_state.final_df
         col1, col2 = st.columns(2)
-        with col1:
+        #with col1:
             #st.metric("Total Sections Analyzed", len(st.session_state.output_df) if not st.session_state.output_df.empty else 0)
-        with col2:
+        #with col2:
             #st.metric("Sections with Differences", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
         
         st.subheader("Comparison Report")
