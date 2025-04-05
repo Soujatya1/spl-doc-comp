@@ -333,7 +333,7 @@ def organize_comparison_results(output_df):
     page_order = [
         "Forwarding Letter", 
         "Schedule", 
-        "Terms and Conditions",
+        "Terms and conditions",
         "Ombudsman Page",
         "Annexure AA",
         "Annexure 1",
