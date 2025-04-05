@@ -440,19 +440,53 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                     result["Sub-category of Observation"] = result.pop(key)
     
         # Create DataFrame
-        output_df = pd.DataFrame(all_results)
+        temp_df = pd.DataFrame(all_results)
     
         # Ensure required columns exist
         required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
         for col in required_columns:
-            if col not in output_df.columns:
-                output_df[col] = ""
-    
+            if col not in temp_df.columns:
+                temp_df[col] = ""
+        
+        # Collate observations for the same page under each category
+        # Group by category and page, then aggregate observations
+        aggregated_results = []
+        
+        for category in temp_df["Observation - Category"].unique():
+            category_df = temp_df[temp_df["Observation - Category"] == category]
+            
+            for page in category_df["Page"].unique():
+                page_rows = category_df[category_df["Page"] == page]
+                
+                # Combine all observations for this page
+                all_observations = []
+                for idx, row in page_rows.iterrows():
+                    observation = row["Sub-category of Observation"]
+                    if observation not in all_observations:  # Avoid duplicates
+                        all_observations.append(observation)
+                
+                # Format the combined observations as a numbered list
+                combined_observations = ""
+                for i, obs in enumerate(all_observations, 1):
+                    # Check if the observation already starts with a number
+                    if not re.match(r'^\d+\.', obs.strip()):
+                        combined_observations += f"{i}. {obs}\n"
+                    else:
+                        combined_observations += f"{obs}\n"
+                
+                # Create aggregated result
+                aggregated_results.append({
+                    "Samples affected": customer_number,
+                    "Observation - Category": category,
+                    "Page": page,
+                    "Sub-category of Observation": combined_observations.strip()
+                })
+        
+        # Create output DataFrame from aggregated results
+        output_df = pd.DataFrame(aggregated_results)
+        
         # Reorder columns
         output_df = output_df[required_columns]
-    
-        # Set default value for Samples affected
-        output_df["Samples affected"] = customer_number
     
         # Organize results by category and page
         output_df = organize_comparison_results(output_df)
