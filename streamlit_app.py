@@ -473,6 +473,7 @@ def save_uploaded_file(uploaded_file):
 def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key):
     """Run the simplified direct comparison process"""
     progress_container = st.empty()
+    output_df = None  # Initialize output_df at the function scope level
     
     try:
         # Extract customer number from filename
@@ -557,6 +558,10 @@ def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_
         return True
         
     except Exception as e:
+        # Make sure we still have access to output_df in case of error
+        if output_df is not None:
+            st.session_state.output_df = output_df
+        
         progress_container.error(f"Error occurred during processing: {e}")
         import traceback
         st.code(traceback.format_exc())
