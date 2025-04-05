@@ -43,7 +43,6 @@ if 'temp_dir' not in st.session_state:
 temp_dir = st.session_state.temp_dir
 
 def preprocess_text(text):
-    """Cleans text: removes text in < > brackets, extra spaces, normalizes, lowercases, and removes punctuation (except periods)."""
     if not text:
         return ""
     text = re.sub(r"<.*?>", "", text)
@@ -145,7 +144,6 @@ def extract_section(extracted_data, start_marker, end_marker):
 
 @st.cache_data
 def store_sections_in_faiss(docx_path, checklist_df):
-    """Store document sections in FAISS with caching"""
     progress_bar = st.progress(0)
     extracted_data = extract_text_by_sections(docx_path)
     sections = []
@@ -192,7 +190,6 @@ def extract_content_within_markers(text, start_marker, end_marker):
         return text
 
 def retrieve_section(page_name, start_marker, end_marker, faiss_index):
-    """Retrieves all documents from the FAISS index whose metadata contains the specified criteria."""
     matching_sections = []
     for doc in faiss_index.documents:
         metadata = doc.metadata
@@ -213,7 +210,6 @@ def extract_customer_number(filename):
     return os.path.splitext(filename)[0]
 
 def create_direct_comparison_prompt(sections_data, customer_number="All Samples"):
-    """Create a prompt for direct comparison of document sections"""
     prompt = (
         "You are a document comparison expert. You will analyze differences between company (Filed Copy) and customer document sections "
         "and produce a consolidated report. The format of your response is critical.\n\n"
