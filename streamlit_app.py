@@ -230,7 +230,7 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
         "4. 'Sub-category of Observation' - Comprehensive summary of ALL differences for that page\n\n"
         
         "CLEAR DISTINCTION BETWEEN CATEGORIES:\n"
-        "- 'Mismatch of content': Use ONLY when the same type of information exists in both documents but differs in details. Example: Company version mentions '30-day period' while customer version shows '15-day period'.\n"
+        "- 'Mismatch of content': Use ONLY when the same type of information exists in both documents but differs in details. Example: Company copy mentions '30-day period' while filed copy shows '15-day period'.\n"
         "- 'Available in Filed Copy but missing': Use ONLY when information appears in company document but is completely absent from customer document. Example: Company document has a section on 'Cancellation Policy' that doesn't appear at all in customer document.\n\n"
         
         "Here are the sections to compare:\n\n"
@@ -238,8 +238,8 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
     
     for section_name, data in sections_data.items():
         prompt += f"SECTION: {section_name}\n"
-        prompt += f"COMPANY VERSION:\n{truncate_text(data['company_text'], 500)}\n\n"
-        prompt += f"CUSTOMER VERSION:\n{truncate_text(data['customer_text'], 500)}\n\n"
+        prompt += f"COMPANY COPY:\n{truncate_text(data['company_text'], 500)}\n\n"
+        prompt += f"FILED COPY:\n{truncate_text(data['customer_text'], 500)}\n\n"
         prompt += "---\n\n"
     
     prompt += (
@@ -269,8 +269,8 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
         "  \"Samples affected\": \"0614054616\",\n"
         "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
         "  \"Page\": \"Forwarding Letter\",\n"
-        "  \"Sub-category of Observation\": \"1. Company version mentions a 30-day response period while customer version states 15 days. "
-        "2. Company version includes different phone number than customer version.\"\n"
+        "  \"Sub-category of Observation\": \"1. Company copy mentions a 30-day response period while filed copy states 15 days. "
+        "2. Company copy includes different phone number than filed copy.\"\n"
         "},\n"
         "{\n"
         "  \"Samples affected\": \"0614054616\",\n"
@@ -293,14 +293,14 @@ def chunk_sections_by_token_count(sections_data, max_tokens=6000):
     current_tokens = 0
     
     for section_name, data in sections_data.items():
-        section_text = f"SECTION: {section_name}\nCOMPANY VERSION:\n{data['company_text']}\n\nCUSTOMER VERSION:\n{data['customer_text']}\n\n"
+        section_text = f"SECTION: {section_name}\nCOMPANY COPY:\n{data['company_text']}\n\nFILED COPY:\n{data['customer_text']}\n\n"
         section_tokens = count_tokens(section_text)
         
         if section_tokens > max_tokens:
             data_copy = data.copy()
             data_copy['company_text'] = truncate_text(data['company_text'], max_tokens // 2)
             data_copy['customer_text'] = truncate_text(data['customer_text'], max_tokens // 2)
-            truncated_section_text = f"SECTION: {section_name}\nCOMPANY VERSION:\n{data_copy['company_text']}\n\nCUSTOMER VERSION:\n{data_copy['customer_text']}\n\n"
+            truncated_section_text = f"SECTION: {section_name}\nCOMPANY COPY:\n{data_copy['company_text']}\n\nFILED COPY:\n{data_copy['customer_text']}\n\n"
             section_tokens = count_tokens(truncated_section_text)
             data = data_copy
         
