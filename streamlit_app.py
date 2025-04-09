@@ -454,8 +454,8 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                 
                 combined_observations = ""
                 for i, obs in enumerate(all_observations, 1):
-                    if not re.match(r'^\d+\.', obs.strip()):
-                        combined_observations += f"{i}. {obs}\n"
+                    if not re.match(r'^\d+\.', obs.strip()) and not obs.strip().startswith('•'):
+                        combined_observations += f"• {obs}\n"
                     else:
                         combined_observations += f"{obs}\n"
                 
