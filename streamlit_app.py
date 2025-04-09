@@ -350,7 +350,7 @@ def organize_comparison_results(output_df):
     
     return sorted_df
 
-@st.cache_data
+@st.cache_resource
 def direct_document_comparison(sections_data, groq_api_key, customer_number="All Samples"):
     section_chunks = chunk_sections_by_token_count(sections_data, max_tokens=6000)
     st.info(f"Split comparison into {len(section_chunks)} chunks based on token limits")
