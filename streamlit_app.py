@@ -270,7 +270,7 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
         
         "Example structure:\n"
         "[{\n"
-        "  \"Samples affected\": \"0614054616\",\n"
+        "  \"Samples affected\": \"{customer_number}\",\n"
         "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
         "  \"Page\": \"Forwarding Letter\",\n"
         "  \"Sub-category of Observation\": \"1. Company copy mentions a 30-day response period while filed copy states 15 days. "
