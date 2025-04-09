@@ -11,7 +11,7 @@ from docx.document import Document as _Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain.docstore.document import Document as LangchainDocument
 from difflib import SequenceMatcher
 from rapidfuzz import fuzz, process
@@ -166,7 +166,7 @@ def store_sections_in_faiss(docx_path, checklist_df):
             doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
             sections.append(doc_obj)
     
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+    embedding_model = FastEmbedEmbeddings(model_name="sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
     faiss_index = FAISS.from_documents(sections, embedding_model)
     faiss_index.documents = sections
     progress_bar.empty()
