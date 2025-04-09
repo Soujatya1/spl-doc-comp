@@ -142,7 +142,7 @@ def extract_section(extracted_data, start_marker, end_marker):
     except ValueError:
         return combined_text
 
-@st.cache_data
+@st.cache_resource
 def store_sections_in_faiss(docx_path, checklist_df):
     progress_bar = st.progress(0)
     extracted_data = extract_text_by_sections(docx_path)
