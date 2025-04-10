@@ -42,6 +42,41 @@ if 'temp_dir' not in st.session_state:
 
 temp_dir = st.session_state.temp_dir
 
+analyzer = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
+def mask_pii(text):
+    """
+    Mask PII in text using Presidio.
+    We exclude DATE_TIME, MONEY, and PERSON as these might be important 
+    for document comparison.
+    """
+    if not text:
+        return ""
+        
+    # Analyze text for PII
+    results = analyzer.analyze(text=text, language='en')
+    
+    # Filter out certain entity types that are important for document comparison
+    allowed_entities = [r for r in results if r.entity_type not in ("DATE_TIME", "MONEY", "PERSON")]
+    
+    # Define operators for anonymization
+    operators = {
+        result.entity_type: OperatorConfig("replace", {"new_value": f"[{result.entity_type}]"})
+        for result in allowed_entities
+    }
+    
+    # Anonymize text
+    if allowed_entities:
+        anonymized_result = anonymizer.anonymize(
+            text=text,
+            analyzer_results=allowed_entities,
+            operators=operators
+        )
+        return anonymized_result.text
+    
+    return text
+
 def preprocess_text(text):
     if not text:
         return ""
