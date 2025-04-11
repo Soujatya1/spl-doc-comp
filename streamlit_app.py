@@ -213,6 +213,8 @@ def create_direct_comparison_prompt(sections_data, customer_number="All Samples"
     prompt = (
         "You are a document comparison expert. You will analyze differences between company (Filed Copy) and customer document sections "
         "and produce a consolidated report. The format of your response is critical.\n\n"
+
+        "IMPORTANT: Do not miss out on any differences as per the input documents\n"
         
         "IMPORTANT: Create a table with EXACTLY these column headers:\n"
         "1. 'Samples affected' - Should always be '{customer_number}'\n"
@@ -452,12 +454,28 @@ def direct_document_comparison(sections_data, groq_api_key, customer_number="All
                     if observation not in all_observations:
                         all_observations.append(observation)
                 
+                # Improved bullet point formatting logic
                 combined_observations = ""
-                for i, obs in enumerate(all_observations, 1):
-                    if not re.match(r'^\d+\.', obs.strip()) and not obs.strip().startswith('•'):
-                        combined_observations += f"• {obs}\n"
+                for obs in all_observations:
+                    # Split observation into individual points if it contains multiple items
+                    if "\n" in obs:
+                        lines = obs.strip().split("\n")
+                        for line in lines:
+                            line = line.strip()
+                            # Skip empty lines
+                            if not line:
+                                continue
+                            # Remove existing numbering or bullets
+                            line = re.sub(r'^\d+\.\s*', '', line)
+                            line = re.sub(r'^•\s*', '', line)
+                            combined_observations += f"• {line}\n"
                     else:
-                        combined_observations += f"{obs}\n"
+                        # Handle single line observations
+                        obs = obs.strip()
+                        # Remove existing numbering or bullets
+                        obs = re.sub(r'^\d+\.\s*', '', obs)
+                        obs = re.sub(r'^•\s*', '', obs)
+                        combined_observations += f"• {obs}\n"
                 
                 aggregated_results.append({
                     "Samples affected": customer_number,
