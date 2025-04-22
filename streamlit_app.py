@@ -72,17 +72,20 @@ def iter_block_items(parent):
         elif child.tag.endswith("tbl"):
             yield Table(child, parent)
 
-def extract_document_content(docx_path):
-    """Extract all content from the document without relying on markers"""
+def extract_text_by_sections(docx_path):
     extracted_data = []
     doc = Document(docx_path)
+    current_section = "unknown_section"
     order_counter = 0
 
     for block in iter_block_items(doc):
         if block.__class__.__name__ == "Paragraph":
-            para_text = block.text.strip()
-            if para_text:
+            para_text = preprocess_text(block.text)
+            if block.style and "heading" in block.style.name.lower() and para_text:
+                current_section = para_text
+            elif para_text:
                 extracted_data.append({
+                    "section": current_section,
                     "text": para_text,
                     "type": "paragraph",
                     "order": order_counter
@@ -91,11 +94,12 @@ def extract_document_content(docx_path):
         elif block.__class__.__name__ == "Table":
             table_data = []
             for row in block.rows:
-                row_cells = [cell.text.strip() for cell in row.cells]
+                row_cells = [preprocess_text(cell.text.strip()) for cell in row.cells]
                 table_data.append(" | ".join(row_cells))
             table_text = "\n".join(table_data)
             if table_text:
                 extracted_data.append({
+                    "section": current_section,
                     "text": f"[TABLE] {table_text}",
                     "type": "table",
                     "order": order_counter
@@ -103,28 +107,101 @@ def extract_document_content(docx_path):
                 order_counter += 1
     return extracted_data
 
+def find_closest_match(target, text_list, threshold=0.65):
+    target = target.lower()
+    best_match = None
+    best_score = threshold
+    for text in text_list:
+        lower_text = text.lower()
+        if target in lower_text:
+            return text
+        score = SequenceMatcher(None, target, lower_text).ratio()
+        if score > best_score:
+            best_score = score
+            best_match = text
+    return best_match
+
+def extract_section(extracted_data, start_marker, end_marker):
+    if not extracted_data:
+        return ""
+    sorted_data = sorted(extracted_data, key=lambda d: d.get("order", 0))
+    combined_text = "\n".join([item["text"] for item in sorted_data])
+    lines = combined_text.split("\n")
+    best_start = find_closest_match(start_marker, lines)
+    best_end = find_closest_match(end_marker, lines)
+
+    if not best_start or not best_end:
+        st.warning(f"Could not find {start_marker} or {end_marker}")
+        return combined_text
+    try:
+        start_idx = lines.index(best_start)
+        end_idx = lines.index(best_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        return "\n".join(lines[start_idx:end_idx+1])
+    except ValueError:
+        return combined_text
+
 @st.cache_resource
-def process_document(docx_path):
-    """Process document and prepare for comparison"""
+def store_sections_in_faiss(docx_path, checklist_df):
     progress_bar = st.progress(0)
-    extracted_data = extract_document_content(docx_path)
+    extracted_data = extract_text_by_sections(docx_path)
+    sections = []
     
-    # Combine all document content into one text block
-    full_text = "\n".join([item["text"] for item in extracted_data])
+    total_rows = len(checklist_df)
+    for idx, row in checklist_df.iterrows():
+        progress_bar.progress((idx + 1) / total_rows)
+            
+        section_name = row['PageName'].strip().lower()
+        start_marker = preprocess_text(row['StartMarker'])
+        end_marker = preprocess_text(row['EndMarker'])
+        section_text = extract_section(extracted_data, start_marker, end_marker)
+        if section_text:
+            metadata = {
+                "section": section_name,
+                "start": start_marker,
+                "end": end_marker,
+                "source": os.path.basename(docx_path)
+            }
+            doc_obj = LangchainDocument(page_content=section_text, metadata=metadata)
+            sections.append(doc_obj)
     
-    # Create a single document object for the entire content
-    doc_obj = LangchainDocument(
-        page_content=full_text,
-        metadata={"source": os.path.basename(docx_path)}
-    )
-    
-    # Store in FAISS for retrieval
     embedding_model = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    faiss_index = FAISS.from_documents([doc_obj], embedding_model)
-    faiss_index.documents = [doc_obj]  # Store original document
-    
+    faiss_index = FAISS.from_documents(sections, embedding_model)
+    faiss_index.documents = sections
     progress_bar.empty()
-    return faiss_index, extracted_data
+    return faiss_index
+
+def extract_content_within_markers(text, start_marker, end_marker):
+    lines = text.split("\n")
+    best_start = find_closest_match(start_marker, lines)
+    best_end = find_closest_match(end_marker, lines)
+    if not best_start or not best_end:
+        st.warning("Could not find both markers exactly; returning full text.")
+        return text
+    try:
+        start_idx = lines.index(best_start)
+        end_idx = lines.index(best_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+        return "\n".join(lines[start_idx:end_idx + 1])
+    except ValueError:
+        st.warning("Error finding marker indices; returning full text.")
+        return text
+
+def retrieve_section(page_name, start_marker, end_marker, faiss_index):
+    matching_sections = []
+    for doc in faiss_index.documents:
+        metadata = doc.metadata
+        if (page_name.lower() in metadata.get("section", "").lower() and
+                start_marker.lower() in metadata.get("start", "").lower() and
+                end_marker.lower() in metadata.get("end", "").lower()):
+            extracted_text = extract_content_within_markers(doc.page_content, start_marker, end_marker)
+            matching_sections.append({
+                "text": extracted_text,
+                "metadata": metadata
+            })
+    return matching_sections
 
 def extract_customer_number(filename):
     if '__' in filename:
@@ -132,7 +209,7 @@ def extract_customer_number(filename):
         return number_part
     return os.path.splitext(filename)[0]
 
-def create_direct_comparison_prompt(company_content, customer_content, customer_number="All Samples"):
+def create_direct_comparison_prompt(sections_data, customer_number="All Samples"):
     prompt = (
         "You are a document comparison expert. You will analyze differences between company (Filed Copy) and customer document sections "
         "and produce a consolidated report. The format of your response is critical.\n\n"
@@ -162,16 +239,18 @@ def create_direct_comparison_prompt(company_content, customer_content, customer_
         "- 'Mismatch of content': Use ONLY when the same type of information exists in both documents but differs in details. Example: Company copy mentions '30-day period' while filed copy shows '15-day period'.\n"
         "- 'Available in Filed Copy but missing': Use ONLY when information appears in company document but is completely absent from customer document. Example: Company document has a section on 'Cancellation Policy' that doesn't appear at all in customer document.\n\n"
         
-        "Here are the documents to compare:\n\n"
-        
-        f"COMPANY COPY (FILED COPY):\n{company_content}\n\n"
-        f"CUSTOMER COPY:\n{customer_content}\n\n"
-        "---\n\n"
+        "Here are the sections to compare:\n\n"
     )
+    
+    for section_name, data in sections_data.items():
+        prompt += f"SECTION: {section_name}\n"
+        prompt += f"COMPANY COPY:\n{truncate_text(data['company_text'], 500)}\n\n"
+        prompt += f"FILED COPY:\n{truncate_text(data['customer_text'], 500)}\n\n"
+        prompt += "---\n\n"
     
     prompt += (
         "INSTRUCTIONS:\n"
-        "1. Compare the content of both documents carefully.\n"
+        "1. Compare the content of each section carefully.\n"
         "2. Identify meaningful differences - ignore minor formatting, spacing, or punctuation differences.\n"
         "3. First determine if content is missing entirely (use 'Available in Filed Copy but missing') OR if similar content exists with differences (use 'Mismatch of content').\n"
         "4. Create ONE ROW PER PAGE in the output table, grouping by category.\n"
@@ -196,13 +275,15 @@ def create_direct_comparison_prompt(company_content, customer_content, customer_
         "  \"Samples affected\": \"{customer_number}\",\n"
         "  \"Observation - Category\": \"Mismatch of content between Filed Copy and customer copy\",\n"
         "  \"Page\": \"Forwarding Letter\",\n"
-        "  \"Sub-category of Observation\": \"• Company copy mentions a 30-day response period while filed copy states 15 days.\n• Company copy includes different phone number than filed copy.\"\n"
+        "  \"Sub-category of Observation\": \"1. Company copy mentions a 30-day response period while filed copy states 15 days. "
+        "2. Company copy includes different phone number than filed copy.\"\n"
         "},\n"
         "{\n"
-        "  \"Samples affected\": \"{customer_number}\",\n"
+        "  \"Samples affected\": \"0614054616\",\n"
         "  \"Observation - Category\": \"Available in Filed Copy but missing in Customer Copy\",\n"
         "  \"Page\": \"Terms and conditions\",\n"
-        "  \"Sub-category of Observation\": \"• Section 4.2 on cancellation policy present in filed copy is completely missing from customer copy.\n• Appendix B with fee schedule present in filed copy doesn't exist in customer copy.\"\n"
+        "  \"Sub-category of Observation\": \"1. Section 4.2 on cancellation policy present in filed copy is completely missing from customer copy. "
+        "2. Appendix B with fee schedule present in filed copy doesn't exist in customer copy.\"\n"
         "}]\n\n"
         
         "IMPORTANT: Create exactly ONE row for each affected page within each category (do not create multiple rows for the same page in the same category). "
@@ -212,26 +293,33 @@ def create_direct_comparison_prompt(company_content, customer_content, customer_
     
     return prompt
 
-def chunk_text_by_token_count(text, max_tokens=6000):
-    """Split text into chunks based on token count limit"""
-    encoding = tiktoken.get_encoding("cl100k_base")
-    tokens = encoding.encode(text)
-    
+def chunk_sections_by_token_count(sections_data, max_tokens=6000):
     chunks = []
-    current_chunk = []
-    current_count = 0
+    current_chunk = {}
+    current_tokens = 0
     
-    for token in tokens:
-        if current_count + 1 > max_tokens:
-            chunks.append(encoding.decode(current_chunk))
-            current_chunk = [token]
-            current_count = 1
-        else:
-            current_chunk.append(token)
-            current_count += 1
+    for section_name, data in sections_data.items():
+        section_text = f"SECTION: {section_name}\nCOMPANY COPY:\n{data['company_text']}\n\nFILED COPY:\n{data['customer_text']}\n\n"
+        section_tokens = count_tokens(section_text)
+        
+        if section_tokens > max_tokens:
+            data_copy = data.copy()
+            data_copy['company_text'] = truncate_text(data['company_text'], max_tokens // 2)
+            data_copy['customer_text'] = truncate_text(data['customer_text'], max_tokens // 2)
+            truncated_section_text = f"SECTION: {section_name}\nCOMPANY COPY:\n{data_copy['company_text']}\n\nFILED COPY:\n{data_copy['customer_text']}\n\n"
+            section_tokens = count_tokens(truncated_section_text)
+            data = data_copy
+        
+        if current_tokens + section_tokens > max_tokens and current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = {}
+            current_tokens = 0
+        
+        current_chunk[section_name] = data
+        current_tokens += section_tokens
     
     if current_chunk:
-        chunks.append(encoding.decode(current_chunk))
+        chunks.append(current_chunk)
     
     return chunks
 
@@ -269,77 +357,142 @@ def organize_comparison_results(output_df):
     return sorted_df
 
 @st.cache_resource
-def direct_document_comparison(company_content, customer_content, groq_api_key, customer_number="All Samples"):
-    # Truncate content to avoid token limit issues
-    company_content_truncated = truncate_text(company_content, 4000)
-    customer_content_truncated = truncate_text(customer_content, 4000)
+def direct_document_comparison(sections_data, groq_api_key, customer_number="All Samples"):
+    section_chunks = chunk_sections_by_token_count(sections_data, max_tokens=6000)
+    st.info(f"Split comparison into {len(section_chunks)} chunks based on token limits")
     
-    prompt = create_direct_comparison_prompt(company_content_truncated, customer_content_truncated, customer_number)
+    all_results = []
     
-    groq_llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="llama3-8b-8192",
-        max_tokens=2000
-    )
-    
-    with st.spinner("Analyzing document differences..."):
-        try:
-            response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
-        except Exception as e:
-            st.error(f"LLM Processing Error: {e}")
-            return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-    
-    if not response.strip():
-        st.warning("Empty response from LLM.")
-        return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-    
-    try:
-        response_text = response.strip()
-        import re
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if json_match:
-            json_text = json_match.group(0)
-            results = json.loads(json_text)
-        else:
+    for i, chunk in enumerate(section_chunks):
+        st.text(f"Processing chunk {i+1} of {len(section_chunks)}")
+        
+        prompt = create_direct_comparison_prompt(chunk, customer_number)
+        
+        groq_llm = ChatGroq(
+            api_key=groq_api_key,
+            model_name="llama3-8b-8192",
+            max_tokens=2000
+        )
+        
+        with st.spinner(f"Analyzing document differences (chunk {i+1}/{len(section_chunks)})..."):
             try:
-                results = json.loads(response_text)
-            except:
-                import ast
+                response = groq_llm.invoke([{"role": "user", "content": prompt}]).content
+            except Exception as e:
+                st.error(f"LLM Processing Error in chunk {i+1}: {e}")
+                continue
+        
+        if not response.strip():
+            st.warning(f"Empty response from LLM for chunk {i+1}.")
+            continue
+        
+        try:
+            response_text = response.strip()
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+                chunk_results = json.loads(json_text)
+            else:
                 try:
-                    results = ast.literal_eval(response_text)
+                    chunk_results = json.loads(response_text)
                 except:
-                    st.error("Could not parse response as JSON")
-                    st.code(response)
-                    return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-        
-        if results:
-            for result in results:
-                for key in list(result.keys()):
-                    if key.lower() == "samples affected" or key.lower() == "samples_affected":
-                        result["Samples affected"] = result.pop(key)
-                    elif key.lower() == "observation - category" or key.lower() == "observation_category":
-                        result["Observation - Category"] = result.pop(key)
-                    elif key.lower() == "page":
-                        result["Page"] = result.pop(key)
-                    elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
-                        result["Sub-category of Observation"] = result.pop(key)
-        
-            output_df = pd.DataFrame(results)
+                    import ast
+                    try:
+                        chunk_results = ast.literal_eval(response_text)
+                    except:
+                        st.error(f"Could not parse response as JSON in chunk {i+1}")
+                        st.code(response)
+                        chunk_results = []
             
-            required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
-            for col in required_columns:
-                if col not in output_df.columns:
-                    output_df[col] = ""
+            all_results.extend(chunk_results)
             
+            if i < len(section_chunks) - 1:
+                time.sleep(10)
+                
+        except Exception as e:
+            st.error(f"Error parsing LLM response in chunk {i+1}: {e}")
+            st.code(response)
+    
+    if all_results:
+        for result in all_results:
+            for key in list(result.keys()):
+                if key.lower() == "samples affected" or key.lower() == "samples_affected":
+                    result["Samples affected"] = result.pop(key)
+                elif key.lower() == "observation - category" or key.lower() == "observation_category":
+                    result["Observation - Category"] = result.pop(key)
+                elif key.lower() == "page":
+                    result["Page"] = result.pop(key)
+                elif key.lower() == "sub-category of observation" or key.lower() == "sub_category":
+                    result["Sub-category of Observation"] = result.pop(key)
+    
+        temp_df = pd.DataFrame(all_results)
+    
+        required_columns = ["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"]
+        for col in required_columns:
+            if col not in temp_df.columns:
+                temp_df[col] = ""
+        
+        aggregated_results = []
+        
+        category_order = [
+            "Mismatch of content between Filed Copy and customer copy",
+            "Available in Filed Copy but missing in Customer Copy"
+        ]
+        
+        for category in category_order:
+            category_df = temp_df[temp_df["Observation - Category"] == category]
+            
+            if category_df.empty:
+                continue
+                
+            for page in category_df["Page"].unique():
+                page_rows = category_df[category_df["Page"] == page]
+                
+                all_observations = []
+                for idx, row in page_rows.iterrows():
+                    observation = row["Sub-category of Observation"]
+                    if observation not in all_observations:
+                        all_observations.append(observation)
+                
+                # Improved bullet point formatting logic
+                combined_observations = ""
+                for obs in all_observations:
+                    # Split observation into individual points if it contains multiple items
+                    if "\n" in obs:
+                        lines = obs.strip().split("\n")
+                        for line in lines:
+                            line = line.strip()
+                            # Skip empty lines
+                            if not line:
+                                continue
+                            # Remove existing numbering or bullets
+                            line = re.sub(r'^\d+\.\s*', '', line)
+                            line = re.sub(r'^•\s*', '', line)
+                            combined_observations += f"• {line}\n"
+                    else:
+                        # Handle single line observations
+                        obs = obs.strip()
+                        # Remove existing numbering or bullets
+                        obs = re.sub(r'^\d+\.\s*', '', obs)
+                        obs = re.sub(r'^•\s*', '', obs)
+                        combined_observations += f"• {obs}\n"
+                
+                aggregated_results.append({
+                    "Samples affected": customer_number,
+                    "Observation - Category": category,
+                    "Page": page,
+                    "Sub-category of Observation": combined_observations.strip()
+                })
+        
+        output_df = pd.DataFrame(aggregated_results)
+        
+        if not output_df.empty:
             output_df = output_df[required_columns]
+    
             output_df = organize_comparison_results(output_df)
-            
-            return output_df
-        else:
-            return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
-    except Exception as e:
-        st.error(f"Error processing LLM response: {e}")
-        st.code(response)
+    
+        return output_df
+    else:
         return pd.DataFrame(columns=["Samples affected", "Observation - Category", "Page", "Sub-category of Observation"])
 
 def save_uploaded_file(uploaded_file):
@@ -350,7 +503,7 @@ def save_uploaded_file(uploaded_file):
         return file_path
     return None
 
-def run_direct_comparison(company_path, customer_path, groq_api_key):
+def run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key):
     progress_container = st.empty()
     output_df = None
     
@@ -359,24 +512,54 @@ def run_direct_comparison(company_path, customer_path, groq_api_key):
         customer_number = extract_customer_number(customer_filename)
         
         with progress_container.container():
-            st.subheader("Step 1: Processing Company Document")
-            st.text("Extracting company document content...")
-            st.session_state.company_faiss, company_data = process_document(company_path)
-            company_content = "\n".join([item["text"] for item in company_data])
-            st.session_state.processing_step = "company_processed"
+            st.subheader("Step 1: Loading Checklist")
+            checklist_df = pd.read_excel(checklist_path)
+            st.session_state.processing_step = "load_checklist"
+            st.success("✅ Checklist loaded successfully")
+
+        with progress_container.container():
+            st.subheader("Step 2: Processing Company Document")
+            st.text("Storing company sections...")
+            st.session_state.company_faiss = store_sections_in_faiss(company_path, checklist_df)
+            st.session_state.processing_step = "company_faiss"
             st.success("✅ Company document processed successfully")
 
         with progress_container.container():
-            st.subheader("Step 2: Processing Customer Document")
-            st.text("Extracting customer document content...")
-            st.session_state.customer_faiss, customer_data = process_document(customer_path)
-            customer_content = "\n".join([item["text"] for item in customer_data])
-            st.session_state.processing_step = "customer_processed"
+            st.subheader("Step 3: Processing Customer Document")
+            st.text("Storing customer sections...")
+            st.session_state.customer_faiss = store_sections_in_faiss(customer_path, checklist_df)
+            st.session_state.processing_step = "customer_faiss"
             st.success("✅ Customer document processed successfully")
 
         with progress_container.container():
-            st.subheader("Step 3: Analyzing Document Differences")
-            output_df = direct_document_comparison(company_content, customer_content, groq_api_key, customer_number)
+            st.subheader("Step 4: Extracting Document Sections")
+            sections_data = {}
+            
+            for idx, row in checklist_df.iterrows():
+                section_name = row['PageName'].strip()
+                start_marker = preprocess_text(row['StartMarker'])
+                end_marker = preprocess_text(row['EndMarker'])
+                
+                st.text(f"Processing section: {section_name}")
+                
+                company_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.company_faiss)
+                customer_section = retrieve_section(section_name, start_marker, end_marker, st.session_state.customer_faiss)
+                
+                if not company_section or not customer_section:
+                    st.warning(f"Could not retrieve sections for {section_name}")
+                    continue
+                
+                sections_data[section_name] = {
+                    "company_text": company_section[0]["text"],
+                    "customer_text": customer_section[0]["text"]
+                }
+            
+            st.session_state.processing_step = "extract_sections"
+            st.success(f"✅ Extracted {len(sections_data)} document sections")
+
+        with progress_container.container():
+            st.subheader("Step 5: Analyzing Document Differences")
+            output_df = direct_document_comparison(sections_data, groq_api_key, customer_number)
             
             if not output_df.empty:
                 category_order = [
@@ -439,6 +622,11 @@ def display_results():
     
     if st.session_state.final_df is not None:
         df_final = st.session_state.final_df
+        col1, col2 = st.columns(2)
+        #with col1:
+            #st.metric("Total Sections Analyzed", len(st.session_state.output_df) if not st.session_state.output_df.empty else 0)
+        #with col2:
+            #st.metric("Sections with Differences", len(df_final[df_final["Comparison"] == "DIFFERENT"]))
         
         st.subheader("Comparison Report")
         if st.session_state.output_df is not None and not st.session_state.output_df.empty:
@@ -579,12 +767,13 @@ def main():
         ### Instructions
         1. Upload the company document (DOCX format)
         2. Upload the customer document (DOCX format) 
-        3. Enter your Groq API key
-        4. Click "Run Comparison"
+        3. Upload the checklist Excel file
+        4. Enter your Groq API key
+        5. Click "Run Comparison"
         
         ### About the Tool
-        This tool compares two documents and uses AI to identify differences between them.
-        It categorizes the differences for easy review.
+        This tool compares two documents section by section based on the checklist provided.
+        It uses AI to identify differences between the documents and categorizes them for easy review.
         """)
     
     col1, col2 = st.columns(2)
@@ -593,14 +782,17 @@ def main():
     with col2:
         customer_file = st.file_uploader("Upload Customer Document (DOCX)", type=["docx"])
     
+    checklist_file = st.file_uploader("Upload Checklist (Excel)", type=["xlsx", "xls"])
+    
     groq_api_key = st.text_input("Enter Groq API Key", type="password")
     
-    if st.button("Run Comparison", disabled=not (company_file and customer_file and groq_api_key)):
+    if st.button("Run Comparison", disabled=not (company_file and customer_file and checklist_file and groq_api_key)):
         with st.spinner("Processing..."):
             company_path = save_uploaded_file(company_file)
             customer_path = save_uploaded_file(customer_file)
+            checklist_path = save_uploaded_file(checklist_file)
             
-            success = run_direct_comparison(company_path, customer_path, groq_api_key)
+            success = run_direct_comparison(company_path, customer_path, checklist_path, groq_api_key)
             
             if success:
                 st.success("Comparison completed successfully!")
